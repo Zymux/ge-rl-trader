@@ -20,6 +20,6 @@ This also explore the ability to integrate with LLM-derived "sentiment / event" 
 
 ## Snapshot plots (example)
 Top Spread% bar chart gives a quick "Market Microstructure / Liquidity risk exists" artifact.
-![Top spreads](docs/assets/snapshot_top_spread_pct_<timestamp>.png)
+![Top spreads](docs/assets/snapshot_top_spread_pct20260222T183642Z.png)
 Spread% vs mid (log x-axis) shows the relationship between price level and spread
-![Spread vs mid](docs/assets/snapshot_spread_vs_mid_<timestamp>.png)
+![Spread vs mid](docs/assets/snapshot_spread_vs_mid_20260222T183642Z.png)
