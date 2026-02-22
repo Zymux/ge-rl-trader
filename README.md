@@ -47,3 +47,9 @@ My understanding:
 Overall: 
 - Liquidity scaled with price and popularity, which might imply that LLM sentiment might provide better results.
 ![Spread vs mid](docs/assets/snapshot_spread_vs_mid_20260222T183642Z.png)
+
+
+## Baseline strategies
+![Momentum equity](docs/assets/baseline_momentum_equity.png)
+![Mean reversion equity](docs/assets/baseline_mean_reversion_equity.png)
+![Baselines compare](docs/assets/baselines_compare_equity.png)
