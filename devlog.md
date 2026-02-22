@@ -15,3 +15,18 @@
 - Observed strong inverse relationship between item price and spread %
 - High spread items tended to be low-price and likely illiquid
 - Concluded that spread % should be treated as a risk / cost feature, not a signal for profit.
+
+## 2026-02-22 - Time series edge cases & feature validation
+- Built a per-item time series from multiple GE snapshots (10+)
+- Observed expected NaNs in log returns and rolling vaoltility due to limited history
+- Fixed log-return computation by masking non-positive prices before applying log
+- Confirmed that rolling volatility features require more snapshots to populate
+- Decided to keep NaNs at this stage rather than forward-fill or drop rows
+- Verified successive GER snapshot payloads differ using different content hashes / confirmed API responses are not cached or duplicated.
+- Dataset suitable for baseline trading strategies
+
+## 2026-02-22 - Momentum baseline validated
+- Implemented a single-position momentume baseline with spread filtering + transaction fee
+- Fixed portfolio valuation bug by tracking last seen price of held item
+- Generated equity curve, short-horizon run ended at around ~0.974 (costs dominated)
+- Mean reversion outperformed momentum over short sample window

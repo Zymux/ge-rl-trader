@@ -22,6 +22,7 @@ Agent also acts in discrete time steps using only observable public signals (pri
 - Price features for each item such as; return, moving averages, volatility.
 - Portfolio features such as; cash balance, inventory counts, current net worth
 - Sentiment features such as; sentiment score, topic tags, confidence
+- State features include log returns and rolling volatility, which become available as sufficient historical context is accumulated.
 
 ### Action space (MVP)
 - Choosing 1 item per step
@@ -40,6 +41,11 @@ are necessary to prevent degenerate trading behavior in the agent.
 
 Spread-related features (spread_gp, spread_pct) will be included
 in the observation space and/or reward function to penalize illiquid trades.
+
+### Time-dependent features
+Rolling statistics (e.g., volatility) require a minimum number of historical
+snapshots per item. During early data collection, these features may be NaN
+and are handled explicitly rather than imputed.
 
 ### Reward
 MVP:
@@ -64,4 +70,5 @@ Shaping:
 - Multiple Seeds
 - Train/val/test split on time
 - Ablation: RL without sentiment vs. RL with sentiment
+- Baselines include transaction costs and liquidity filters to prevent illiquid-item artifacts
 
