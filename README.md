@@ -1,4 +1,4 @@
-# GE Trade - RL + LLM Signals Portfolio Project
+# GE Trade - RL + LLM Signals Project
 
 In this project I'm exploring the ability to train a reinforcement learning agent to trade a simplified Grand Exchange-style market using public price data.
 This also explore the ability to integrate with LLM-derived "sentiment / event" features, based on community discussions, path notes, and other possible extra signals.
@@ -18,3 +18,8 @@ This also explore the ability to integrate with LLM-derived "sentiment / event" 
 - `src/eval` will contain metrics + plots
 - `docs/` will contain design and the devlogs
 
+## Snapshot plots (example)
+Top Spread% bar chart gives a quick "Market Microstructure / Liquidity risk exists" artifact.
+![Top spreads](docs/assets/snapshot_top_spread_pct_<timestamp>.png)
+Spread% vs mid (log x-axis) shows the relationship between price level and spread
+![Spread vs mid](docs/assets/snapshot_spread_vs_mid_<timestamp>.png)
