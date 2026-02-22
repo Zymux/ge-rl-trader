@@ -18,6 +18,12 @@ This also explore the ability to integrate with LLM-derived "sentiment / event" 
 - `src/eval` will contain metrics + plots
 - `docs/` will contain design and the devlogs
 
+## Market snapshot exploration
+Initial analysis of a GE price snapshot shows a strong inverse relationship
+between item price and relative bid–ask spread, highlighting liquidity risk
+in low-priced items. This motivates explicit transaction-cost modeling
+in the RL environment.
+
 ## Snapshot plots (example)
 Top Spread% bar chart gives a quick "Market Microstructure / Liquidity risk exists" artifact.
 Analysis:

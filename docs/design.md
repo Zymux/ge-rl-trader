@@ -32,6 +32,15 @@ Future upgrades:
 - Multi-item actions
 - Risk constraints
 
+### Liquidity considerations
+Exploratory analysis shows that spread % varies strongly with item price,
+with low-priced items exhibiting extremely high relative spreads.
+This implies that transaction cost modeling and liquidity filtering
+are necessary to prevent degenerate trading behavior in the agent.
+
+Spread-related features (spread_gp, spread_pct) will be included
+in the observation space and/or reward function to penalize illiquid trades.
+
 ### Reward
 MVP:
 - reward = Δ(netWorth) per step - transactionCost
