@@ -20,6 +20,24 @@ This also explore the ability to integrate with LLM-derived "sentiment / event" 
 
 ## Snapshot plots (example)
 Top Spread% bar chart gives a quick "Market Microstructure / Liquidity risk exists" artifact.
+Analysis:
+- Largest spreads are 45-50%, even after filtering
+- High spread % means that **buying and immediately selling is expensive**.
+My understanding:
+- Most likely these items have low trade volume, a sporadic demand, stale low prics (such as someone selling at 1 gp), or asymmetric demand between buyers/sellers. 
+- The GE prices are actually reflecting *executed* trades, not a live order book, which is why spreads are noisy for illiquid items.
+Overall:
+- High spread is not equal to good profit. So very *high execution risk*
 ![Top spreads](docs/assets/snapshot_top_spread_pct20260222T183642Z.png)
+
 Spread% vs mid (log x-axis) shows the relationship between price level and spread
+Analysis:
+- Clear inverse relationship between low price items having wide spread % and high price items having tight spread %
+- Dense cluster around 0% at high mid prices
+- Longish tail of noisy, illiquid items in low prices
+My understanding:
+- High value items are traded frequently, there is competitive pricing, and lots of buyers/sellers, so this leads to tight spreads
+- Cheap items have a thin volum, there might be price anchoring issues, and stale low/high, which leads to artificial spread inflation
+Overall: 
+- Liquidity scaled with price and popularity, which might imply that LLM sentiment might provide better results.
 ![Spread vs mid](docs/assets/snapshot_spread_vs_mid_20260222T183642Z.png)
