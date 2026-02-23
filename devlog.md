@@ -39,6 +39,13 @@
 - Regenerated baseline equity curves and comparison plot under consistent GE rules
 
 
+## 2026-02-23 -
+### Creating the RL Environment
+- Created `geEnv.py` and `testEnv.py`to implement Gym environemnt using GE rules, random policy test passes.
+
+
+
+
 ## PENDING: 
 - Creating the RL environment
     - Reading timeseries GE

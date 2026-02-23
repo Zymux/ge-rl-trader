@@ -37,12 +37,16 @@ This project models OSRS Grand Exchange trading at an abstracted but realistic l
 
 ## Environment definition for gymnasium
 ### State (Observation)
+- Observation = [K candidates x (log(mid), return, spread) + (cash, holding)]
+
 - Price features for each item such as; return, moving averages, volatility.
 - Portfolio features such as; cash balance, inventory counts, current net worth
 - Sentiment features such as; sentiment score, topic tags, confidence
 - State features include log returns and rolling volatility, which become available as sufficient historical context is accumulated.
 
 ### Action space (MVP)
+- Action = (candidate_index, HOLD/BUY/SELL)
+
 - Choosing 1 item per step
 - Choosing action such as BUY, SELL HOLD
 - Set a fixed trade size such as 1 unit or fixed gp amount
