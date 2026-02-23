@@ -33,7 +33,16 @@
 - Mean reversion outperformed momentum over short sample window
 
 
-## Baseline freeze
+### Baseline freeze
 - Updated all baseline strategies to apply the GE sell tax (2%) and SELL only
 - Converted `src/` and `src/` into Python packages and switched to module-based execution (`python -m`)
 - Regenerated baseline equity curves and comparison plot under consistent GE rules
+
+
+## PENDING: 
+- Creating the RL environment
+    - Reading timeseries GE
+    - Applying sales tax via GERules
+    - Trading under constraints same as baseline
+- Training RL agent (PPO)
+- Integrating LLM sentiment after RL work
