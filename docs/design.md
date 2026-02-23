@@ -16,6 +16,24 @@ Agent also acts in discrete time steps using only observable public signals (pri
 ## Core assumptions
 - Simulate fills at observed prices (plus transaction cost and the slippage if any)
 - Inventory limited, cash limited.
+- No order book
+- Single-unit Trades
+- Public price snapshots only
+- Sell-side tax only
+
+## Market mechanics modeled (Grand Exchange)
+
+This project models OSRS Grand Exchange trading at an abstracted but realistic level:
+
+- Agent observes only public price snapshots (high, low, mid)
+- No access to internal order book depth or queue priority
+- Trades execute at observed mid-price (proxy for matched offers)
+- Single-unit, single-position trading (simplified capital allocation)
+- Illiquid items filtered using spread percentage
+- GE sell tax applied at 2% on SELL actions only (rounded down)
+- No tax or fee applied on BUY actions
+- No explicit buy-limit enforcement (documented simplification)
+
 
 ## Environment definition for gymnasium
 ### State (Observation)

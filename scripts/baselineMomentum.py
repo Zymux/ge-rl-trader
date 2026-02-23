@@ -1,36 +1,56 @@
 from __future__ import annotations
 
 from pathlib import Path
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+
+from src.geRules import GERules  
 
 TS_PATH = Path("data") / "timeseries" / "ge_item_timeseries.csv"
 ASSETS_DIR = Path("docs") / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
+
 
 def load_ts() -> pd.DataFrame:
     df = pd.read_csv(TS_PATH, parse_dates=["parsed_utc"])
     df = df.sort_values(["item_id", "parsed_utc"])
     return df
 
+
 def compute_momentum(df: pd.DataFrame, window: int = 3) -> pd.DataFrame:
     df["mom"] = (
-        df.groupby('item_id')["log_return"]
+        df.groupby("item_id")["log_return"]
         .rolling(window=window, min_periods=window)
         .sum()
         .reset_index(level=0, drop=True)
     )
     return df
 
-def run_strategy(df: pd.DataFrame, threshold: float = 0.01, max_spread_pct: float = 0.05, fee_pct: float = 0.002) -> pd.DataFrame:
-    # starting position / buy when momentum > threshold / exit when moment < threshold / filters illiquid items by spread_pct and applies the small trx fee/slippage on buys/sells
+
+def run_strategy(
+    df: pd.DataFrame,
+    threshold: float = 0.01,
+    max_spread_pct: float = 0.05,
+    rules: GERules = GERules(),
+) -> pd.DataFrame:
+    """
+    Single-position momentum baseline.
+
+    Decisions:
+      - BUY if mom > threshold (no tax on buy)
+      - SELL if mom < -threshold (apply GE sell tax)
+
+    Reality knobs:
+      - max_spread_pct filters illiquid rows
+      - mark-to-market uses last seen price for held item
+    """
     cash = 1.0
     position_units = 0.0
-    position_item = None
+    position_item: int | None = None
     held_last_price = np.nan
 
-    equity_curve = []
+    equity_curve: list[float] = []
 
     df = df.dropna(subset=["parsed_utc", "item_id", "mid", "mom", "spread_pct"])
     df = df.sort_values("parsed_utc")
@@ -41,40 +61,33 @@ def run_strategy(df: pd.DataFrame, threshold: float = 0.01, max_spread_pct: floa
         mom = float(row["mom"])
         spread_pct = float(row["spread_pct"])
 
-        # Update last seen price if this row corresponds to our held item
+        # update held mark-to-market price when we see the held item again
         if position_item == item_id:
             held_last_price = price
 
-        # Compute equity using the last known held price (if holding)
+        # mark-to-market equity
         if position_item is None:
             net_worth = cash
         else:
-            if np.isnan(held_last_price):
-                # fallback: if we somehow never saw a price for held item, treat as cash (should be rare)
-                net_worth = cash
-            else:
-                net_worth = cash + position_units * held_last_price
+            net_worth = cash + position_units * held_last_price if not np.isnan(held_last_price) else cash
 
-        # Skip illiquid items for ENTRY/EXIT decisions (but still record equity)
+        # liquidity filter for entry/exit (still record equity)
         if spread_pct > max_spread_pct:
             equity_curve.append(net_worth)
             continue
 
-        # BUY
+        # BUY (no tax on buy)
         if position_item is None and mom > threshold:
-            cash_after_fee = cash * (1.0 - fee_pct)
-            position_units = cash_after_fee / price
+            position_units = cash / price
             cash = 0.0
             position_item = item_id
-            held_last_price = price  # initialize held price at entry
-
-            # Recompute equity immediately after trade
+            held_last_price = price
             net_worth = cash + position_units * held_last_price
 
-        # SELL
+        # SELL (GE sell tax)
         elif position_item == item_id and mom < -threshold and position_units > 0:
-            proceeds = position_units * price
-            cash = proceeds * (1.0 - fee_pct)
+            gross = position_units * price
+            cash = rules.sell_net_proceeds(gross)
             position_units = 0.0
             position_item = None
             held_last_price = np.nan
@@ -85,16 +98,19 @@ def run_strategy(df: pd.DataFrame, threshold: float = 0.01, max_spread_pct: floa
     out = df.iloc[:len(equity_curve)].copy()
     out["equity"] = equity_curve
     return out
-            
+
+
 def main():
     df = load_ts()
-    df = compute_momnetum(df, window=3)
-    result = run_strategy(df, threshold=0.01, max_spread_pct=0.05, fee_pct=0.002)    
+    df = compute_momentum(df, window=3)
+
+    rules = GERules()  # sell tax on SELL only
+    result = run_strategy(df, threshold=0.01, max_spread_pct=0.05, rules=rules)
+
     print("Equity min/max:", result["equity"].min(), result["equity"].max())
-    print("Final equity:", result["equity"].iloc[-1])
+    print("Final equity:", float(result["equity"].iloc[-1]))
 
     out_plot = ASSETS_DIR / "baseline_momentum_equity.png"
-    
     plt.figure()
     plt.plot(result["parsed_utc"], result["equity"])
     plt.xlabel("Time")
@@ -106,6 +122,7 @@ def main():
 
     print(f"Saved equity curve: {out_plot}")
     print(f"Final equity: {result['equity'].iloc[-1]:.4f}")
+
 
 if __name__ == "__main__":
     main()

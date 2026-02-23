@@ -1,9 +1,11 @@
 from __future__ import annotations
 
 from pathlib import Path
-import pandas as pd
 import numpy as np
+import pandas as pd
 import matplotlib.pyplot as plt
+
+from src.geRules import GERules 
 
 TS_PATH = Path("data") / "timeseries" / "ge_item_timeseries.csv"
 ASSETS_DIR = Path("docs") / "assets"
@@ -15,28 +17,39 @@ def load_ts() -> pd.DataFrame:
     df = df.sort_values(["item_id", "parsed_utc"])
     return df
 
+
 def compute_zscore(df: pd.DataFrame, window: int = 5) -> pd.DataFrame:
-    # Mean reversion signal: z = (mid - rolling_mean(mid)) / rolling_std(mid)
+    """
+    Mean reversion signal:
+      z = (mid - rolling_mean(mid)) / rolling_std(mid)
+    """
     g = df.groupby("item_id")["mid"]
     roll_mean = g.rolling(window=window, min_periods=window).mean().reset_index(level=0, drop=True)
     roll_std = g.rolling(window=window, min_periods=window).std().reset_index(level=0, drop=True)
-    
+
     df["z"] = (df["mid"] - roll_mean) / roll_std
-    
     return df
+
 
 def run_strategy(
     df: pd.DataFrame,
     entry_z: float = -1.0,
     exit_z: float = 0.0,
     max_spread_pct: float = 0.05,
-    fee_pct: float = 0.002,
+    rules: GERules = GERules(),
 ) -> pd.DataFrame:
+    """
+    Single-position mean reversion baseline.
+
+    Decisions:
+      - BUY when z <= entry_z (no tax on buy)
+      - SELL when z >= exit_z (apply GE sell tax)
+    """
     cash = 1.0
     position_units = 0.0
-    position_item = None
+    position_item: int | None = None
     held_last_price = np.nan
-    equity_curve = []
+    equity_curve: list[float] = []
 
     df = df.dropna(subset=["parsed_utc", "item_id", "mid", "z", "spread_pct"])
     df = df.sort_values("parsed_utc")
@@ -50,30 +63,29 @@ def run_strategy(
         if position_item == item_id:
             held_last_price = price
 
-        # mark-to-market
+        # mark-to-market equity
         if position_item is None:
             net_worth = cash
         else:
-            net_worth = cash + position_units * held_last_price
+            net_worth = cash + position_units * held_last_price if not np.isnan(held_last_price) else cash
 
         # liquidity filter for decisions
         if spread_pct > max_spread_pct:
             equity_curve.append(net_worth)
             continue
 
-        # ENTRY: buy when price is "cheap" vs mean
+        # BUY (no tax on buy)
         if position_item is None and z <= entry_z:
-            cash_after_fee = cash * (1.0 - fee_pct)
-            position_units = cash_after_fee / price
+            position_units = cash / price
             cash = 0.0
             position_item = item_id
             held_last_price = price
             net_worth = cash + position_units * held_last_price
 
-        # EXIT: sell when reverted back toward/above mean
+        # SELL (GE sell tax)
         elif position_item == item_id and z >= exit_z and position_units > 0:
-            proceeds = position_units * price
-            cash = proceeds * (1.0 - fee_pct)
+            gross = position_units * price
+            cash = rules.sell_net_proceeds(gross)
             position_units = 0.0
             position_item = None
             held_last_price = np.nan
@@ -85,13 +97,15 @@ def run_strategy(
     out["equity"] = equity_curve
     return out
 
+
 def main():
     df = load_ts()
     df = compute_zscore(df, window=5)
-    result = run_strategy(df, entry_z=-1.0, exit_z=0.0, max_spread_pct=0.05, fee_pct=0.002)
+
+    rules = GERules()
+    result = run_strategy(df, entry_z=-1.0, exit_z=0.0, max_spread_pct=0.05, rules=rules)
 
     out_plot = ASSETS_DIR / "baseline_mean_reversion_equity.png"
-
     plt.figure()
     plt.plot(result["parsed_utc"], result["equity"])
     plt.xlabel("Time")

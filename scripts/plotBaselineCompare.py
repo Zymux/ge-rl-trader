@@ -4,6 +4,8 @@ from pathlib import Path
 import pandas as pd
 import matplotlib.pyplot as plt
 
+from src.geRules import GERules
+
 ASSETS_DIR = Path("docs") / "assets"
 ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 
@@ -20,13 +22,14 @@ from scripts import baselineMeanReversion as mr
 
 def main() -> None:
     df = pd.read_csv(TS_PATH, parse_dates=["parsed_utc"]).sort_values(["item_id", "parsed_utc"])
+    rules = GERules()
 
     # recompute both curves from the same underlying df
     df_m = mom.compute_momentum(df.copy(), window=3)
-    res_m = mom.run_strategy(df_m, threshold=0.01, max_spread_pct=0.05, fee_pct=0.002)
+    res_m = mom.run_strategy(df_m, threshold=0.01, max_spread_pct=0.05, rules=rules)
 
     df_r = mr.compute_zscore(df.copy(), window=5)
-    res_r = mr.run_strategy(df_r, entry_z=-1.0, exit_z=0.0, max_spread_pct=0.05, fee_pct=0.002)
+    res_r = mr.run_strategy(df_r, entry_z=-1.0, exit_z=0.0, max_spread_pct=0.05, rules=rules)
 
     out_plot = ASSETS_DIR / "baselines_compare_equity.png"
 
