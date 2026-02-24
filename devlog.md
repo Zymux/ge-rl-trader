@@ -39,17 +39,32 @@
 - Regenerated baseline equity curves and comparison plot under consistent GE rules
 
 
-## 2026-02-23 -
-### Creating the RL Environment
+## 2026-02-23 - 
+### GE Execution + env validation + PPO readiness
 - Created `geEnv.py` and `testEnv.py`to implement Gym environemnt using GE rules, random policy test passes.
 
+### Environment (GE Simulator)
+- Implemented the GE-simulator execution costs:
+    - BUY executing at ask derived from mid + half-spread
+    - SELL executing at bid derived from mid - half-spread
+    - SELL applying 2% GE tax through GERules
+- Normalized reward to be relative to starting_cash to stabilize PPO training.
+- Identified and fixed RL stability issues:
+    - SELL shoudl always liquidate the held item (not depend on top-K candidate list)
+
+### Validation
+- Forced buy/sell test confirmed tax behavior:
+    - Starting cash of 10,000,000 (gp) after sell cash it displayed 9,800,000 (gp) (2% tax hit)
+- Confirmed pipeline produces time-varying snapshots and a useable timeseries CSV
+
+### Data pipeline / baselines
+- Built minute-level snapshot collection (pricePull + parseLatest)
+- Generated baseline equity curves
 
 
 
 ## PENDING: 
-- Creating the RL environment
-    - Reading timeseries GE
-    - Applying sales tax via GERules
-    - Trading under constraints same as baseline
-- Training RL agent (PPO)
+- Collecting 3+ hours of snapshots to increase unique timestamps for longer episodes
+- Retraining PPO with stbale env (sell-held-item semantics + normalized reward)
+- Add evaluation script for PPO vs Momentum vs MeanReversion (same episode windows) + metrics table
 - Integrating LLM sentiment after RL work

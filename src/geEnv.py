@@ -70,17 +70,24 @@ class GERLTraderEnv(gym.Env):
         snap = snap.sort_values("score", ascending=False)
         return snap.head(self.cfg.k_candidates)
     
-    def _mark_to_market(self, snap: pd.DataFrame) -> float:
+    # added a full snapshopt at time t
+    def _full_snapshot(self, time_idx: int) -> pd.DataFrame:
+        tstamp = self.times[time_idx]
+        return self.df[self.df["parsed_utc"] == tstamp]
+    
+    def _mark_to_market(self, time_idx: int) -> float:
         if self.pos_item is None:
             return self.cash
-    
-        row = snap[snap["item_id"] == self.pos_item]
+
+        full = self._full_snapshot(time_idx)
+        row = full[full["item_id"] == self.pos_item]
         if len(row) > 0:
             self.held_last_price = float(row.iloc[0]["mid"])
+
         if self.held_last_price is None:
             return self.cash
-        return self.cash + self.pos_units * self.held_last_price
-    
+
+        return self.cash + self.pos_units * self.held_last_price    
     
     def _get_obs(self) -> np.ndarray:
         snap = self._snapshot(self.t)
@@ -101,23 +108,38 @@ class GERLTraderEnv(gym.Env):
     
     def reset(self, seed=None, options=None):
         super().reset(seed=seed)
-        
-        max_start = max(0, len(self.times) - self.cfg.episode_len - 2)
-        self.t0 = int(self.np_random.integers(0, max_start + 1))
+
+        options = options or {}
+        start_idx = options.get("start_idx", None)
+
+        max_start = len(self.times) - (self.cfg.episode_len + 1)
+        if max_start < 0:
+            raise ValueError(
+                f"Not enough timestamps ({len(self.times)}) for episode_len={self.cfg.episode_len}"
+            )
+
+        if start_idx is None:
+            self.t0 = int(self.np_random.integers(0, max_start + 1))
+        else:
+            start_idx = int(start_idx)
+            if not (0 <= start_idx <= max_start):
+                raise ValueError(f"start_idx must be in [0, {max_start}], got {start_idx}")
+            self.t0 = start_idx
+
         self.t = self.t0
-        
+
         self.cash = self.cfg.starting_cash
         self.pos_item = None
         self.pos_units = 0.0
         self.held_last_price = None
-        
-        return self._get_obs(), {}
-    
+
+        return self._get_obs(), {}    
+
     def step(self, action):
         cand_idx,act = int(action[0]), int(action[1])
         
         snap = self._snapshot(self.t)
-        prev_worth = self._mark_to_market(snap)
+        prev_worth = self._mark_to_market(self.t)        
         
         chosen_item = None
         chosen_price = None
@@ -126,32 +148,82 @@ class GERLTraderEnv(gym.Env):
             chosen_price = float(snap.iloc[cand_idx]["mid"])
             
         # executing
-        if act == 1 and self.pos_item is None and chosen_item is None:
-            # BUY: no tax
-            self.pos_units = self.cash / chosen_price
-            self.cash = 0.0
-            self.pos_item = chosen_item
-            self.held_last_price = chosen_price
+        if chosen_item is not None and chosen_price is not None:
+            # approximate bid/ask from mid + spread
+            # spread_pct ~= (high-low)/mid, so half-spread ~= spread_pct/2
+            half = float(snap.iloc[cand_idx]["spread_pct"]) * 0.5
+            ask = chosen_price * (1.0 + half)   # buy worse
+            bid = chosen_price * (1.0 - half)   # sell worse
+
+            # BUY: no GE tax (but you pay the spread implicitly via ask)
+            if act == 1 and self.pos_item is None:
+                if ask > 0:
+                    self.pos_units = self.cash / ask
+                    self.cash = 0.0
+                    self.pos_item = chosen_item
+                    self.held_last_price = ask
+
+            # SELL: apply spread (bid) + 2% GE tax
+            # elif act == 2 and self.pos_item is not None:
+            #     # only allow selling the held item; use its bid from the *current* snapshot if present
+            #     # if the held item isn't in the candidate list, fall back to full snapshot mid and apply its spread if available
+            #     if chosen_item == self.pos_item:
+            #         gross = self.pos_units * bid
+            #         self.cash = self.rules.sell_net_proceeds(gross)
+            #         self.pos_units = 0.0
+            #         self.pos_item = None
+            #         self.held_last_price = None
+            #     else:
+            #         # fallback: look up held item at this time
+            #         full = self._full_snapshot(self.t)
+            #         row = full[full["item_id"] == self.pos_item]
+            #         if len(row) > 0:
+            #             mid = float(row.iloc[0]["mid"])
+            #             sp = float(row.iloc[0]["spread_pct"])
+            #             bid2 = mid * (1.0 - 0.5 * sp)
+            #             gross = self.pos_units * bid2
+            #             self.cash = self.rules.sell_net_proceeds(gross)
+            #             self.pos_units = 0.0
+            #             self.pos_item = None
+            #             self.held_last_price = None    
             
-        elif act == 2 and self.pos_item is not None:
-            # SELL current holding at current snapshot price (if available)
-            row = snap[snap["item_id"] == self.pos_item]
-            if len(row) > 0:
-                sell_price = float(row.iloc[0]["mid"])
-                gross = self.pos_units * sell_price
-                self.cash = self.rules.sell_net_proceeds(gross)
+            ## Updated to below so that I remove the "candidate-set trap" where PPO can buyu something, but later can't sell because it wasn't in the top-K candidates at the sell timestep.
+            # SELL: always sell the currently held item (ignore cand_idx)
+            elif act == 2 and self.pos_item is not None and self.pos_units > 0:
+                # Look up held item on the FULL snapshot for this timestep
+                full = self._full_snapshot(self.t)
+                row = full[full["item_id"] == self.pos_item]
+
+                if len(row) > 0:
+                    mid = float(row.iloc[0]["mid"])
+                    sp = float(row.iloc[0]["spread_pct"])
+                    half = 0.5 * sp
+                    bid = mid * (1.0 - half)  # worse execution on sell
+
+                    gross = self.pos_units * bid
+                    self.cash = float(self.rules.sell_net_proceeds(gross))  # applies 2% tax (floored)
+                else:
+                    # If the held item can't be found (should be rare), do nothing
+                    # (Alternatively: you can force liquidate at last price)
+                    pass
+
+                # Clear position
                 self.pos_units = 0.0
                 self.pos_item = None
-                self.held_last_price = None            
-                
+                self.held_last_price = None 
+                                    
         # advance time
         self.t += 1
+
+        # clamp time first (prevents index errors in _snapshot/_get_obs)
+        if self.t >= len(self.times):
+            self.t = len(self.times) - 1
+
+        # terminate if we reached episode horizon OR dataset end
         terminated = (self.t >= self.t0 + self.cfg.episode_len) or (self.t >= len(self.times) - 1)
-        
-        next_snap = self._snapshot(self.t)
-        new_worth = self._mark_to_market(next_snap)
-        
-        reward = float(new_worth - prev_worth)
+
+        new_worth = self._mark_to_market(self.t)
+        reward = float(new_worth - prev_worth) / float(self.cfg.starting_cash)
         obs = self._get_obs()
         info = {"net_worth": new_worth, "t": self.t}
         

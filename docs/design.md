@@ -33,6 +33,19 @@ This project models OSRS Grand Exchange trading at an abstracted but realistic l
 - GE sell tax applied at 2% on SELL actions only (rounded down)
 - No tax or fee applied on BUY actions
 - No explicit buy-limit enforcement (documented simplification)
+- BUY: execute at ask = mid * (1 + 0.5 * spread_pct)
+  - No GE tax on buy
+- SELL: execute at bid = mid * (1 − 0.5 * spread_pct)
+  - Apply 2% GE tax on sell proceeds (integer rounding / floor)
+
+## Action semantics (important for RL stability)
+Action = (candidate_index, action_type)
+
+- HOLD: no trade
+- BUY: uses candidate_index to select an item; opens a single position using all cash
+- SELL: ignores candidate_index and always liquidates the held item at current timestep
+
+Rationale: the candidate set changes over time; SELL must not depend on whether the held item appears in top-K candidates.
 
 
 ## Environment definition for gymnasium
@@ -46,6 +59,15 @@ This project models OSRS Grand Exchange trading at an abstracted but realistic l
 
 ### Action space (MVP)
 - Action = (candidate_index, HOLD/BUY/SELL)
+- UPDATED:
+    Action = (candidate_index, action_type)
+
+    - HOLD: no trade
+    - BUY: uses candidate_index to select an item; opens a single position using all cash
+    - SELL: ignores candidate_index and always liquidates the held item at current timestep
+
+    Rationale: the candidate set changes over time; SELL must not depend on whether the held item appears in top-K candidates.
+
 
 - Choosing 1 item per step
 - Choosing action such as BUY, SELL HOLD
@@ -73,6 +95,11 @@ and are handled explicitly rather than imputed.
 MVP:
 - reward = Δ(netWorth) per step - transactionCost
 where netWorth = cash + sum (inventory_i * price_i)
+
+reward_t = (net_worth_t − net_worth_{t−1}) / starting_cash
+    This keeps reward scale stable for PPO and prevents large GP-denominated spikes.
+
+
 
 Shaping:
 - small penalty for excessive trades
