@@ -53,3 +53,20 @@ Overall:
 ![Momentum equity](docs/assets/baseline_momentum_equity.png)
 ![Mean reversion equity](docs/assets/baseline_mean_reversion_equity.png)
 ![Baselines compare](docs/assets/baselines_compare_equity.png)
+
+
+## First PPO Results on 3 hours of GE data 
+![PPO Rewards - 800k~ rows | 4300~ items | 100k Eps | 75 episode length | 10m starting cash](docs/assets/ppo_training_returns_1.png)
+Analysis:
+- Episode return converged to 0, flat lining aroudn 400-700 episodes.
+- Logs showed __explained_variance__ as 0 most of the time, meaning the value function wasn't able to explain the returns.
+    - Most likely due to rewards being tiny/noisy or observation not being able to carry predictive signal
+- Rewards scale was small, meaning PPO will most likely learn to "do nothing or trade very minimally"
+    - Most likely due to the spread + 2% sell tax, so random trades were negative EV.
+    - Also dividing the ep_rew_mean of 0.0005 with starting_cash has an impact.
+
+Conclusion:
+- Agent decided to *NOT* Trade, or trade rarely.
+- Changes: 
+    - Creating an evalPPO.py to load the ppo tracker, run a full episode of determinstic policy, save the equity, and print the equity. 
+    - This will allow to show if PPO equity is 1.0 while momentum is 1.11 then PPO is underperforming.

@@ -13,7 +13,7 @@ ASSETS_DIR.mkdir(parents=True, exist_ok=True)
 def make_env():
     env = GERLTraderEnv(
         "data/timeseries/ge_item_timeseries.csv",
-        EnvConfig(k_candidates=25, episode_len=200, starting_cash=10_000_000),
+        EnvConfig(k_candidates=25, episode_len=75, starting_cash=10_000_000),
     )
     return Monitor(env)
 
