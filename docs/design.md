@@ -121,3 +121,98 @@ Shaping:
 - Ablation: RL without sentiment vs. RL with sentiment
 - Baselines include transaction costs and liquidity filters to prevent illiquid-item artifacts
 
+---
+
+## Before you train: out-of-sample eval and learning checks
+
+### 2) Evaluate properly (out-of-sample)
+
+**Before trusting any run:** Train on one date range, then run evaluation on a **different** range (or different timeseries file) than training. If you only train and eval on the same window, PPO can “memorize the regime.” Use `--eval-ts <path_to_different_dates.csv>` with verifyLearning.py.
+
+### 3) Three checks to confirm learning is real
+
+After training, verify:
+
+1. **Trade rate:** Policy is not always HOLD, and not constant churn. (e.g. executed BUY+SELL per episode in a sensible range.)
+2. **Blocked actions:** `blocked_reason` frequency goes down over training. (Log blocked-reason counts in eval callbacks or rollouts; early training should have more blocks than late.)
+3. **Equity curve:** Policy equity beats a baseline (buy-and-hold one item, or random valid policy).
+
+The env already emits `executed`, `blocked_reason`, `realized_pnl`, `net_worth` in `info` — use these to compute all three.
+
+### 4) Baselines (important)
+
+Before trusting PPO results, compare against:
+
+- **Always HOLD:** No trades; equity = 1.0 (minus any forced liquidation at episode end if you had a position from a previous run).
+- **Random valid actions:** Buy only when flat (no position), sell only when in position; otherwise HOLD. Random choice among valid actions.
+- **Simple heuristic:** e.g. buy when last return &gt; 0 and sell when &lt; 0 (momentum), or the reverse (mean reversion). Use one item (e.g. candidate 0) or aggregate.
+
+Use the same eval episodes (and if possible out-of-sample window) for policy and baselines so the comparison is fair.
+
+---
+
+## What we need to do for #3 (minimal viable “GE-like” v2)
+
+Current env is v1: instant fill at synthetic bid/ask. To learn actual OSRS flipping (place, wait, cancel, partial fill), we need the following.
+
+### A) Change the agent’s actions (critical)
+
+Right now actions are: **HOLD / BUY candidate / SELL current**.
+
+For GE-like flipping, actions must become **order placement + cancellation**:
+
+**Minimum action set:**
+- **PLACE_BUY**: (item_id, price, qty)
+- **PLACE_SELL**: (item_id, price, qty) — typically only if you hold inventory
+- **CANCEL_ORDER**: cancel one of your active offers
+- **HOLD**
+
+Enforce slot limits (8/3) later; for now, keep “1 active buy + 1 active sell” to make it tractable.
+
+### B) Add “resting offers” state to the environment
+
+Add env state like:
+- **active_buy**: {item_id, price, qty_remaining}
+- **active_sell**: {item_id, price, qty_remaining}
+- (optionally multiple slots)
+
+This is the heart of GE flipping (orders persist).
+
+### C) Add a matching / fill model (no full order book needed)
+
+We can’t see real GE book depth, so approximate fills with a **probabilistic model** using only the time series:
+
+At each timestep for an item:
+- Compute a reference price (mid).
+- Define a **fill probability** that increases when the offer is aggressive:
+  - Place buy **above** mid → higher chance to fill.
+  - Place sell **below** mid → higher chance to fill.
+  - Undercut/overcut the wrong way → near-zero fill.
+
+A simple fill curve:
+- `p_fill = sigmoid(k * (mid - buy_price) / mid)` for buys (adjust sign by convention).
+- Similar for sells.
+
+Allow **partial fills**:
+- `filled_qty ~ Binomial(qty_remaining, p_fill)` (or Poisson).
+
+This gives RL the “wait vs improve price” tradeoff that makes flipping interesting.
+
+### D) Execution price logic: “who posted first”
+
+Wiki: execution price depends on which side existed first. In the sim (no book), approximate:
+- If your **buy** fills: you pay your **limit price** (or slightly better with small improvement).
+- If your **sell** fills: you receive your **limit price**.
+- (Optional) small “price improvement” noise.
+
+That’s enough for RL.
+
+### E) Reward stays net-worth based (already good)
+
+Current reward is equity log return. We already enforce:
+- Integer units
+- Buy limits with connected buckets
+- Sell tax
+
+So reward is fine. The missing piece is **how trades happen** (resting offers + fill model instead of instant fill).
+

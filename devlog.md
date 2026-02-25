@@ -61,10 +61,43 @@
 - Built minute-level snapshot collection (pricePull + parseLatest)
 - Generated baseline equity curves
 
+## 2026-02-24 -
+### PPO model evaluation and certain bugs in trading logic/GE simulator
+- Created `evalPolicyEquity.py` and `evalPPO.py`to evaluate the trained PPO model.
+- `evalPolicyEquity.py` analysis over 50 episodes:
+    - Displayed that dataset was fine since it dispalyed 191 timesteps across different times
+    - Within Episode 0, environment/episode produced zero net-worth movement __min=max=mean=10_000_000__
+    - 37~ trades per episode / normalized equity remained 1. throughout all episodes.
+    - Conclusion: 
+        - Not holding across time, policy alternates BUY then SELL so quickly the expusre is most likely 0 most of the time
+        - Environment logic effectively flattened the position at every step
+        - Action execution was "all-in" then "all-out" within the same timestep
+        - Printed Episode 0 for the fraction of steps where inventory != 0, 
+- Confirmed MTM (Market-to-Market) accouintign is correct
+- 
+- Fixed equity only updating on episode end (but positions remianing flat) -> Δequity = 0 every episode
+- Fixed transaction costs canceling out gains -> Net equity never moved
+- Fixed policy evaluation using dummy / frozen price -> RL cant extract value from static prices
+
+
+## 2026-02-25 -
+### Fixing GE Environment/Simulation mechanics
+- PPO results appeared "too good", which led to a more indepth analysis of the GE.
+- Fixed "all-in" buying -> This enocuraged degenerate behavior
+- Fixed net-worth evaluation bug caused by top-K candidate filtering
+- Added full-universe snapshot for valuation and liquidation
+- Added carry-forward pricing(last_pos_price)
+- Confirmed PPO stability after env fixes
+- Ran full-episode equity evaluation
+- Verified strong out-of-sample performance
+- Explicitly mapped missing GE mechanics to OSRS Wiki
+
 
 
 ## PENDING: 
 - Collecting 3+ hours of snapshots to increase unique timestamps for longer episodes
+- Updated GE to have real OSRS 4-hour buy limits (per item)
+- Modeled the GE offer mechanics such as agent learning actual GE behavior of margin checking or undercutting/overcutting.
 - Retraining PPO with stbale env (sell-held-item semantics + normalized reward)
 - Add evaluation script for PPO vs Momentum vs MeanReversion (same episode windows) + metrics table
 - Integrating LLM sentiment after RL work

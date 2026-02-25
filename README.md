@@ -57,16 +57,94 @@ Overall:
 
 ## First PPO Results on 3 hours of GE data 
 ![PPO Rewards - 800k~ rows | 4300~ items | 100k Eps | 75 episode length | 10m starting cash](docs/assets/ppo_training_returns_1.png)
-Analysis:
-- Episode return converged to 0, flat lining aroudn 400-700 episodes.
-- Logs showed __explained_variance__ as 0 most of the time, meaning the value function wasn't able to explain the returns.
-    - Most likely due to rewards being tiny/noisy or observation not being able to carry predictive signal
-- Rewards scale was small, meaning PPO will most likely learn to "do nothing or trade very minimally"
-    - Most likely due to the spread + 2% sell tax, so random trades were negative EV.
-    - Also dividing the ep_rew_mean of 0.0005 with starting_cash has an impact.
+**Configuration**
+- Episode length: 75
+- Starting cash: 10,000,000 GP
+- Observation: top-K GE snapshot (filtered by spread/volatility)
+- Reward: per-step log change in net worth
+- Data: ~3 hours of GE snapshots
 
-Conclusion:
-- Agent decided to *NOT* Trade, or trade rarely.
-- Changes: 
-    - Creating an evalPPO.py to load the ppo tracker, run a full episode of determinstic policy, save the equity, and print the equity. 
-    - This will allow to show if PPO equity is 1.0 while momentum is 1.11 then PPO is underperforming.
+**Observed behavior**
+- Episode return quickly converged to ~0 and flat-lined
+- PPO frequently chose HOLD or traded very rarely
+- Explained variance was often near zero, indicating the value function could not model returns
+
+**Root cause (post-hoc analysis)**
+This was not an RL instability or lack of signal.
+
+The environment had a **valuation bug**:
+- Net worth was computed only from the filtered top-K snapshot
+- If a held item disappeared from the observation slice, its value dropped to zero
+- End-of-episode liquidation could use incomplete pricing data
+
+These artifacts produced high-variance, misleading rewards that prevented PPO from learning a stable value function.
+
+**Conclusion**
+- The agent learned to avoid trading, not because trading was unprofitable, but because rewards were corrupted.
+- PPO performance in this phase is not meaningful.
+
+---
+
+## Environment Fixes
+
+The GE environment was audited and corrected before retraining:
+
+- Added a full-universe snapshot for mark-to-market valuation and liquidation
+- Ensured held positions are always valued, even when not in the observation slice
+- Corrected end-of-episode valuation timing
+- Added carry-forward pricing (`last_pos_price`) to handle sparse snapshots
+
+After these fixes:
+- Net worth is stable and monotonic
+- No artificial zero-equity events occur
+- Reward reflects true trading performance
+
+---
+
+### Second PPO Results (Post-Fix)
+
+![PPO Evaluation Returns – Post-Fix](docs/assets/ppo_training_returns_3.png)
+
+
+**Training diagnostics**
+- Mean evaluation reward increases steadily and plateaus cleanly
+- KL divergence and entropy remain within healthy ranges
+- Explained variance improves significantly, indicating a learnable value function
+
+---
+
+### Out-of-Sample Evaluation
+
+The trained policy was evaluated on a **held-out time range** not used during training.
+
+| Policy                | Final Equity (Mean) |
+|-----------------------|---------------------|
+| **PPO (trained)**     | **1.57×** |
+| Always HOLD           | 1.00× |
+| Random valid actions  | 0.91× |
+| Momentum heuristic    | 0.96× |
+
+Additional observations:
+- Trades per episode: ~9–10
+- Inventory exposure: <10% of episode steps
+- Trades are sparse and intentional, not churn
+- No valuation artifacts or invalid liquidations observed
+
+---
+
+### Conclusion
+
+The failure of the initial PPO run was caused by **environment-level valuation errors**, not by reinforcement learning instability or lack of predictive signal.
+
+Once corrected:
+- PPO successfully learns a profitable trading policy
+- Performance generalizes out-of-sample
+- The environment provides a reliable foundation for further realism improvements
+
+The current simulator uses instant mid-price execution and simplified mechanics. Future work will focus on modeling true OSRS GE behavior, including:
+- Rolling 4-hour buy limits
+- Offer slots
+- Limit-order placement and partial fills
+- More realistic fill dynamics
+
+This establishes a clean v1 baseline before introducing additional market complexity.

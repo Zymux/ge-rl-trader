@@ -36,7 +36,7 @@ def build_timeseries(df: pd.DataFrame) -> pd.DataFrame:
     
     df ["log_return"] = df.groupby("item_id")["log_mid"].diff() # chosen because price changes are multiplicative, and log returns are scale-invariant / additive over time. RL learns better from normalized signals
     
-    # rolling volatility (last 5 snapshots) -> how much price moves around, taking 5 observations to compute it, std chosen for volatility and resetting index to flatten back to original DF.
+    # vol_5 = rolling volatility (std of log returns over 5 steps). Not volume/liquidity — for that you'd need GE DB volume.
     df["vol_5"] = (
         df.groupby("item_id")["log_return"]
         .rolling(window=5, min_periods=3) 
