@@ -64,8 +64,13 @@ class GEEnvConfig:
     # position sizing: cap fraction of cash per BUY (stops "all-in" exploit)
     max_cash_fraction_per_trade: float = 0.25  # e.g. 0.25 = spend at most 25% of cash per buy
 
-    # action space: [candidate_index, action_type]
-    # action_type: HOLD=0, BUY=1 (use candidate), SELL_CURRENT=2 (ignore candidate, sell held item if any)
+    # v2.0 action space (limit-order microstructure):
+    #   [candidate_index, act_type, price_offset_idx, qty_idx]
+    #   act_type: 0=HOLD, 1=PLACE_BUY, 2=PLACE_SELL
+    #   price_offset_idx ∈ {0..6} → offsets {-3..+3} * price_offset_pct_step around mid
+    #   qty_idx ∈ {0..2} → fractions {0.25, 0.5, 1.0} of max_cash_fraction_per_trade / position_units
+    price_offset_pct_step: float = 0.002  # ~0.2% per offset step around mid
+    fill_slope: float = 5.0              # sigmoid slope for probabilistic fills
     seed: int = 123
 
 
@@ -121,14 +126,19 @@ class GEEnv(gym.Env):
         if not self._item_to_bucket:
             raise ValueError(f"buy_limit_csv has no rows: {self.cfg.buy_limit_csv}")
 
-        # Action: candidate index + action type
-        self.action_space = spaces.MultiDiscrete([self.cfg.max_candidates, 3])
+        # Action (v2.0): [candidate_index, act_type, price_offset_idx, qty_idx]
+        # act_type: 0=HOLD, 1=PLACE_BUY, 2=PLACE_SELL
+        self.action_space = spaces.MultiDiscrete([self.cfg.max_candidates, 3, 7, 3])
+        self._price_offset_grid = np.array([-3, -2, -1, 0, 1, 2, 3], dtype=np.int32)
+        self._qty_grid = np.array([0.25, 0.5, 1.0], dtype=np.float32)
 
-        # Observation: features per candidate + portfolio state
+        # Observation: features per candidate + portfolio + resting order state
         # For each candidate: [mid_norm, logret, vol_5 (volatility), spread_pct]
-        # Portfolio: [cash_norm, has_pos, pos_units_norm, pos_mid_norm]
+        # Portfolio: [cash_norm, has_pos, pos_units_norm, pos_mid_norm,
+        #             has_active_buy, buy_price_rel_mid, buy_qty_norm, buy_age_norm,
+        #             has_active_sell, sell_price_rel_mid, sell_qty_norm, sell_age_norm]
         self.obs_dim_per_item = 4
-        self.port_dim = 4
+        self.port_dim = 12
         self.observation_space = spaces.Box(
             low=-np.inf,
             high=np.inf,
@@ -147,6 +157,10 @@ class GEEnv(gym.Env):
         # buy limit window: bucket_id -> (bought_qty_in_window, window_start_ts); shared buckets = connected limits
         self._buy_window: Dict[Any, Tuple[int, Any]] = {}
         self.position_cost_basis: float = 0.0  # cash spent to open position (for realized_pnl)
+        # v2.0 resting orders: at most one buy + one sell offer
+        self.active_buy: Optional[Dict[str, Any]] = None
+        self.active_sell: Optional[Dict[str, Any]] = None
+        self.step_index: int = 0
 
     # ---------- helpers ----------
 
@@ -222,7 +236,60 @@ class GEEnv(gym.Env):
             if not match.empty:
                 pos_mid_norm = float(match.iloc[0]["mid"]) / max(med, 1e-9)
 
-        port = np.array([cash_norm, has_pos, pos_units_norm, pos_mid_norm], dtype=np.float32)
+        # resting order features (single-slot: 1 active buy + 1 active sell)
+        has_active_buy = 1.0 if self.active_buy is not None else 0.0
+        buy_price_rel_mid = 0.0
+        buy_qty_norm = 0.0
+        buy_age_norm = 0.0
+        if self.active_buy is not None:
+            buy_item_id = int(self.active_buy.get("item_id", -1))
+            buy_mid = None
+            if buy_item_id != -1:
+                match = snap[snap["item_id"].astype(int) == buy_item_id]
+                if not match.empty:
+                    buy_mid = float(match.iloc[0]["mid"])
+            if buy_mid is None:
+                buy_mid = med if med > 0 else 1.0
+            buy_price_rel_mid = (float(self.active_buy["price"]) - buy_mid) / max(buy_mid, 1e-9)
+            buy_qty_norm = float(self.active_buy.get("qty_remaining", 0)) / 1_000_000.0
+            age_steps = max(0, self.t - int(self.active_buy.get("created_step", self.t)))
+            buy_age_norm = min(1.0, age_steps / max(self.cfg.episode_len, 1))
+
+        has_active_sell = 1.0 if self.active_sell is not None else 0.0
+        sell_price_rel_mid = 0.0
+        sell_qty_norm = 0.0
+        sell_age_norm = 0.0
+        if self.active_sell is not None:
+            sell_item_id = int(self.active_sell.get("item_id", -1))
+            sell_mid = None
+            if sell_item_id != -1:
+                match = snap[snap["item_id"].astype(int) == sell_item_id]
+                if not match.empty:
+                    sell_mid = float(match.iloc[0]["mid"])
+            if sell_mid is None:
+                sell_mid = med if med > 0 else 1.0
+            sell_price_rel_mid = (sell_mid - float(self.active_sell["price"])) / max(sell_mid, 1e-9)
+            sell_qty_norm = float(self.active_sell.get("qty_remaining", 0)) / 1_000_000.0
+            age_steps = max(0, self.t - int(self.active_sell.get("created_step", self.t)))
+            sell_age_norm = min(1.0, age_steps / max(self.cfg.episode_len, 1))
+
+        port = np.array(
+            [
+                cash_norm,
+                has_pos,
+                pos_units_norm,
+                pos_mid_norm,
+                has_active_buy,
+                buy_price_rel_mid,
+                buy_qty_norm,
+                buy_age_norm,
+                has_active_sell,
+                sell_price_rel_mid,
+                sell_qty_norm,
+                sell_age_norm,
+            ],
+            dtype=np.float32,
+        )
         obs = np.concatenate([feats.astype(np.float32), port], axis=0)
         return obs
 
@@ -273,6 +340,7 @@ class GEEnv(gym.Env):
         # choose random start so we have enough room for episode
         self.t0 = int(self.rng.integers(0, len(self.times) - self.cfg.episode_len))
         self.t = self.t0
+        self.step_index = 0
 
         self.cash = self.cfg.starting_cash
         self.position_item = None
@@ -280,115 +348,229 @@ class GEEnv(gym.Env):
         self.position_cost_basis = 0.0
         self.last_pos_price = None
         self._buy_window.clear()
+        self.active_buy = None
+        self.active_sell = None
 
         snap = self._snapshot(self.t)
         self.prev_worth = self._net_worth(snap)
 
         return self._get_obs(), {}
 
+    def _simulate_fills(self, snap: pd.DataFrame) -> Tuple[int, int]:
+        """Probabilistic partial fills for at most one buy + one sell offer."""
+        buy_filled = 0
+        sell_filled = 0
+
+        if self.active_buy is not None:
+            qty = int(self.active_buy.get("qty_remaining", 0))
+            if qty > 0:
+                item_id = int(self.active_buy.get("item_id", -1))
+                match = snap[snap["item_id"].astype(int) == item_id]
+                if not match.empty:
+                    mid = float(match.iloc[0]["mid"])
+                    if mid > 0:
+                        price = float(self.active_buy["price"])
+                        edge = (price - mid) / mid
+                        k = float(self.cfg.fill_slope)
+                        p_fill = 1.0 / (1.0 + np.exp(-k * edge))
+                        p_fill = float(np.clip(p_fill, 0.0, 1.0))
+                        if p_fill > 0.0:
+                            fill_qty = int(self.rng.binomial(qty, p_fill))
+                            if fill_qty > 0:
+                                # respect available cash at fill time
+                                max_affordable = int(self.cash // price)
+                                fill_qty = min(fill_qty, max_affordable)
+                                if fill_qty > 0:
+                                    cost = float(fill_qty) * price
+                                    self.cash -= cost
+                                    # update position and cost basis
+                                    if self.position_item is None:
+                                        self.position_item = item_id
+                                        self.position_units = 0.0
+                                        self.position_cost_basis = 0.0
+                                    if self.position_item == item_id:
+                                        self.position_units += float(fill_qty)
+                                        self.position_cost_basis += cost
+                                        self.last_pos_price = mid
+                                    qty -= fill_qty
+                                    self.active_buy["qty_remaining"] = qty
+                                    buy_filled = fill_qty
+
+        if self.active_sell is not None:
+            qty = int(self.active_sell.get("qty_remaining", 0))
+            if qty > 0 and self.position_item is not None and self.position_units > 0:
+                item_id = int(self.active_sell.get("item_id", -1))
+                match = snap[snap["item_id"].astype(int) == item_id]
+                if not match.empty:
+                    mid = float(match.iloc[0]["mid"])
+                    if mid > 0:
+                        price = float(self.active_sell["price"])
+                        edge = (mid - price) / mid
+                        k = float(self.cfg.fill_slope)
+                        p_fill = 1.0 / (1.0 + np.exp(-k * edge))
+                        p_fill = float(np.clip(p_fill, 0.0, 1.0))
+                        if p_fill > 0.0:
+                            fill_qty = int(self.rng.binomial(qty, p_fill))
+                            if fill_qty > 0:
+                                # cannot sell more than current position
+                                max_sellable = int(self.position_units)
+                                fill_qty = min(fill_qty, max_sellable)
+                                if fill_qty > 0:
+                                    gross = float(fill_qty) * price
+                                    proceeds_after_tax = self.rules.apply_sell_tax(gross)
+                                    self.cash += proceeds_after_tax
+                                    # update position units and cost basis (simple average-cost model)
+                                    if self.position_units > 0:
+                                        avg_cost = self.position_cost_basis / max(self.position_units, 1e-9)
+                                        cost_out = avg_cost * float(fill_qty)
+                                        self.position_cost_basis = max(0.0, self.position_cost_basis - cost_out)
+                                        self.position_units = max(0.0, self.position_units - float(fill_qty))
+                                    qty -= fill_qty
+                                    self.active_sell["qty_remaining"] = qty
+                                    sell_filled = fill_qty
+
+        if self.active_buy is not None and int(self.active_buy.get("qty_remaining", 0)) <= 0:
+            self.active_buy = None
+        if self.active_sell is not None and int(self.active_sell.get("qty_remaining", 0)) <= 0:
+            self.active_sell = None
+
+        return buy_filled, sell_filled
+
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         cand_idx = int(action[0])
-        act_type = int(action[1])  # 0 hold, 1 buy, 2 sell
+        act_type = int(action[1])  # 0=HOLD, 1=PLACE_BUY, 2=PLACE_SELL
+        price_offset_idx = int(action[2])
+        qty_idx = int(action[3])
 
-        # Override invalid actions to HOLD so the agent focuses on trading, not "don't be dumb"
+        # Override obviously invalid actions to HOLD so the agent focuses on trading, not "don't be dumb"
         blocked_reason: Optional[str] = None
         if act_type == 2 and (self.position_item is None or self.position_units <= 0):
             blocked_reason = "sell_blocked_no_position"
-            act_type = 0  # SELL with no position -> HOLD
+            act_type = 0
         elif act_type == 1 and self.position_item is not None:
             blocked_reason = "buy_blocked_already_in_position"
-            act_type = 0  # BUY when already in position -> HOLD
+            act_type = 0
+
+        # single-slot v2.0: block if an order already exists on that side
+        if act_type == 1 and self.active_buy is not None:
+            blocked_reason = "buy_blocked_active_order"
+            act_type = 0
+        if act_type == 2 and self.active_sell is not None:
+            blocked_reason = "sell_blocked_active_order"
+            act_type = 0
 
         snap = self._snapshot(self.t)
 
-        # Candidate row is used only for BUY. For SELL_CURRENT we ignore it and sell the held item.
         cand_idx = max(0, min(cand_idx, len(snap) - 1))
         row = snap.iloc[cand_idx]
         item_id = int(row["item_id"]) if row["item_id"] != -1 else -1
         mid = float(row["mid"])
         spread_pct = float(row.get("spread_pct", self.cfg.min_spread_pct_floor))
-        _, ask = self._bid_ask(mid, spread_pct)
 
         executed = "NONE"
         exec_price: Optional[float] = None
         realized_pnl: Optional[float] = None
-        acted_item_id_for_info: int = item_id  # for BUY = candidate; for SELL = held item (set below)
+        acted_item_id_for_info: int = item_id
 
-        if act_type == 1:  # BUY selected candidate at ask
-            if self.position_item is not None:
-                blocked_reason = "buy_blocked_already_in_position"
-            elif item_id == -1 or ask <= 0 or self.cash <= 0:
-                if item_id == -1 or ask <= 0:
-                    blocked_reason = "buy_blocked_invalid_item_or_price"
+        # map discrete indices to offsets / qty fractions
+        price_offset = int(self._price_offset_grid[price_offset_idx % len(self._price_offset_grid)])
+        qty_frac = float(self._qty_grid[qty_idx % len(self._qty_grid)])
+
+        if act_type == 1:  # PLACE_BUY: post resting buy offer at limit price
+            if item_id == -1 or mid <= 0 or self.cash <= 0 or qty_frac <= 0.0:
+                if item_id == -1 or mid <= 0:
+                    blocked_reason = blocked_reason or "buy_blocked_invalid_item_or_price"
                 else:
-                    blocked_reason = "buy_blocked_no_cash"
+                    blocked_reason = blocked_reason or "buy_blocked_no_cash"
             else:
-                # buy limits (4h window): item must be in CSV; use bucket_id for connected limits
-                if item_id not in self._item_to_bucket:
-                    blocked_reason = "buy_blocked_no_limit_for_item"
+                limit_price = mid * (1.0 + price_offset * self.cfg.price_offset_pct_step)
+                if limit_price <= 0:
+                    blocked_reason = blocked_reason or "buy_blocked_invalid_limit_price"
                 else:
-                    bucket_id = self._item_to_bucket[item_id]
-                    limit_int = self._bucket_limit[bucket_id]
-                    # Window reset is by real elapsed time (parsed_utc), not step count
-                    now_ts = self.times[self.t]
-                    bought, start_ts = self._buy_window.get(bucket_id, (0, now_ts))
-                    delta_sec = (pd.Timestamp(now_ts) - pd.Timestamp(start_ts)).total_seconds()
-                    if delta_sec >= self.cfg.buy_limit_window_seconds:
-                        bought, start_ts = 0, now_ts
-                    bought_int = int(bought)
-                    remaining = max(0, limit_int - bought_int)
-                    if remaining <= 0:
-                        blocked_reason = "buy_blocked_limit_reached"
+                    # buy limits (4h window): item must be in CSV; use bucket_id for connected limits
+                    if item_id not in self._item_to_bucket:
+                        blocked_reason = blocked_reason or "buy_blocked_no_limit_for_item"
                     else:
-                        # position sizing + integer qty (GE trades whole units)
-                        spend_cap = self.cash * self.cfg.max_cash_fraction_per_trade
-                        units_wanted = int(spend_cap / ask)
-                        units_bought = min(units_wanted, remaining)
-                        if units_bought <= 0:
-                            blocked_reason = "buy_blocked_limit_reached"
+                        bucket_id = self._item_to_bucket[item_id]
+                        limit_int = self._bucket_limit[bucket_id]
+                        now_ts = self.times[self.t]
+                        bought, start_ts = self._buy_window.get(bucket_id, (0, now_ts))
+                        delta_sec = (pd.Timestamp(now_ts) - pd.Timestamp(start_ts)).total_seconds()
+                        if delta_sec >= self.cfg.buy_limit_window_seconds:
+                            bought, start_ts = 0, now_ts
+                        bought_int = int(bought)
+                        remaining = max(0, limit_int - bought_int)
+                        if remaining <= 0:
+                            blocked_reason = blocked_reason or "buy_blocked_limit_reached"
                         else:
-                            cost = units_bought * ask
-                            self.cash -= cost
-                            self.position_units = float(units_bought)
-                            self.position_item = item_id
-                            self.last_pos_price = mid
-                            self.position_cost_basis = cost
-                            self._buy_window[bucket_id] = (bought_int + units_bought, start_ts)
-                            executed = "BUY"
-                            exec_price = ask
+                            # position sizing + integer qty (GE trades whole units)
+                            spend_cap = self.cash * self.cfg.max_cash_fraction_per_trade
+                            trade_budget = max(0.0, spend_cap) * qty_frac
+                            units_wanted = int(trade_budget / limit_price)
+                            units_order = min(units_wanted, remaining)
+                            if units_order <= 0:
+                                blocked_reason = blocked_reason or "buy_blocked_limit_reached"
+                            else:
+                                self.active_buy = {
+                                    "item_id": item_id,
+                                    "price": float(limit_price),
+                                    "qty_remaining": int(units_order),
+                                    "created_step": int(self.t),
+                                }
+                                # v2.0 simplification: consume limit at order placement (not per fill)
+                                self._buy_window[bucket_id] = (bought_int + units_order, start_ts)
+                                executed = "PLACE_BUY"
+                                exec_price = float(limit_price)
 
-        elif act_type == 2:  # SELL_CURRENT: sell held position at bid; candidate_index is unused
+        elif act_type == 2:  # PLACE_SELL: post resting sell offer at limit price (only if in position)
             if self.position_item is None or self.position_units <= 0:
-                blocked_reason = "sell_blocked_no_position"
+                blocked_reason = blocked_reason or "sell_blocked_no_position"
             else:
+                # use full slice so held item is always findable
                 full_now = self._full_slice(self.t)
                 match = full_now[full_now["item_id"].astype(int) == int(self.position_item)]
                 if match.empty and self.last_pos_price is None:
-                    blocked_reason = "sell_blocked_no_price"
+                    blocked_reason = blocked_reason or "sell_blocked_no_price"
                 else:
                     if not match.empty:
-                        m = float(match.iloc[0]["mid"])
-                        sp = float(match.iloc[0].get("spread_pct", self.cfg.min_spread_pct_floor))
-                        bid, _ = self._bid_ask(m, sp)
+                        base_mid = float(match.iloc[0]["mid"])
                     else:
-                        bid, _ = self._bid_ask(self.last_pos_price or 0.0, self.cfg.min_spread_pct_floor)
-                    if bid <= 0:
-                        blocked_reason = "sell_blocked_invalid_price"
+                        base_mid = float(self.last_pos_price or 0.0)
+                    if base_mid <= 0:
+                        blocked_reason = blocked_reason or "sell_blocked_invalid_price"
                     else:
-                        acted_item_id_for_info = int(self.position_item)
-                        proceeds = self.position_units * bid
-                        proceeds_after_tax = self.rules.apply_sell_tax(proceeds)
-                        self.cash += proceeds_after_tax
-                        realized_pnl = proceeds_after_tax - self.position_cost_basis
-                        self.position_item = None
-                        self.position_units = 0.0
-                        self.last_pos_price = None
-                        self.position_cost_basis = 0.0
-                        executed = "SELL"
-                        exec_price = bid
+                        limit_price = base_mid * (1.0 + price_offset * self.cfg.price_offset_pct_step)
+                        if limit_price <= 0:
+                            blocked_reason = blocked_reason or "sell_blocked_invalid_limit_price"
+                        else:
+                            max_units = int(self.position_units)
+                            units_order = int(max_units * qty_frac)
+                            units_order = max(1, min(units_order, max_units))
+                            if units_order <= 0:
+                                blocked_reason = blocked_reason or "sell_blocked_no_position"
+                            else:
+                                acted_item_id_for_info = int(self.position_item)
+                                self.active_sell = {
+                                    "item_id": int(self.position_item),
+                                    "price": float(limit_price),
+                                    "qty_remaining": int(units_order),
+                                    "created_step": int(self.t),
+                                }
+                                executed = "PLACE_SELL"
+                                exec_price = float(limit_price)
+
+        # simulate probabilistic partial fills for resting orders (including ones just posted)
+        buy_filled, sell_filled = self._simulate_fills(snap)
+        if buy_filled > 0 and sell_filled == 0:
+            executed = "BUY"
+        elif sell_filled > 0 and buy_filled == 0:
+            executed = "SELL"
+        elif buy_filled > 0 and sell_filled > 0:
+            executed = "BUY_SELL"
 
         # Advance time: each step uses next timestamp so prices can change (time-series, not static snapshot).
         self.t += 1
+        self.step_index += 1
         done = (self.t >= self.t0 + self.cfg.episode_len)
 
         worth_time_idx = self.t - 1 if done else self.t
@@ -438,6 +620,8 @@ class GEEnv(gym.Env):
         info["pos_item_id"] = int(self.position_item) if self.position_item is not None else -1
         info["pos_mid"] = pos_mid  # mark price of position after step (None if no position)
         info["executed"] = executed
+        info["buy_filled"] = int(buy_filled)
+        info["sell_filled"] = int(sell_filled)
         if exec_price is not None:
             info["exec_price"] = exec_price
         if realized_pnl is not None:

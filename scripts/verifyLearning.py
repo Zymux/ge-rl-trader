@@ -62,14 +62,15 @@ def run_policy(venv, model, n_episodes: int):
 
 
 def run_baseline_hold(venv, n_episodes: int):
-    """Always HOLD (action type 0)."""
+    """Always HOLD (action type 0, neutral price/qty indices)."""
     final_equities = []
     for _ in range(n_episodes):
         obs = venv.reset()
         done_arr = np.array([False])
         last_info = None
         while not done_arr.any():
-            action = np.array([[0, 0]])  # candidate 0, HOLD
+            # HOLD: candidate 0, act_type=0, center price_offset_idx, max qty_idx (unused)
+            action = np.array([[0, 0, 3, 2]])
             obs, _, done_arr, info = venv.step(action)
             last_info = info[0]
         if last_info and "net_worth" in last_info:
@@ -88,11 +89,13 @@ def run_baseline_random(venv, n_episodes: int, seed: int = 42):
         while not done_arr.any():
             in_position = (last_info or {}).get("in_position", False) if last_info else False
             if in_position:
-                action_type = rng.choice([0, 2])  # HOLD or SELL (no BUY when in position)
+                action_type = rng.choice([0, 2])  # HOLD or PLACE_SELL (no PLACE_BUY when in position)
             else:
-                action_type = rng.choice([0, 1])  # HOLD or BUY
+                action_type = rng.choice([0, 1])  # HOLD or PLACE_BUY
             cand = rng.integers(0, MAX_CANDIDATES)
-            action = np.array([[cand, action_type]])
+            price_offset_idx = rng.integers(0, 7)
+            qty_idx = rng.integers(0, 3)
+            action = np.array([[cand, action_type, int(price_offset_idx), int(qty_idx)]])
             obs, _, done_arr, info = venv.step(action)
             last_info = info[0]
         if last_info and "net_worth" in last_info:
@@ -116,12 +119,13 @@ def run_baseline_heuristic(venv, n_episodes: int, momentum: bool = True):
             else:
                 buy_signal = logret_0 < 0
                 sell_signal = logret_0 > 0
+            # Use center price offset (idx=3 -> 0%) and full qty (idx=2 -> 1.0)
             if in_position and sell_signal:
-                action = np.array([[0, 2]])  # SELL current
+                action = np.array([[0, 2, 3, 2]])  # PLACE_SELL current
             elif not in_position and buy_signal:
-                action = np.array([[0, 1]])  # BUY candidate 0
+                action = np.array([[0, 1, 3, 2]])  # PLACE_BUY candidate 0
             else:
-                action = np.array([[0, 0]])  # HOLD
+                action = np.array([[0, 0, 3, 2]])  # HOLD
             obs, _, done_arr, info = venv.step(action)
             last_info = info[0]
         if last_info and "net_worth" in last_info:
