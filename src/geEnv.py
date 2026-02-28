@@ -64,9 +64,9 @@ class GEEnvConfig:
     # position sizing: cap fraction of cash per BUY (stops "all-in" exploit)
     max_cash_fraction_per_trade: float = 0.25  # e.g. 0.25 = spend at most 25% of cash per buy
 
-    # v2.0 action space (limit-order microstructure):
+    # v2.0/2.1 action space (limit-order microstructure):
     #   [candidate_index, act_type, price_offset_idx, qty_idx]
-    #   act_type: 0=HOLD, 1=PLACE_BUY, 2=PLACE_SELL
+    #   act_type: 0=HOLD, 1=PLACE_BUY, 2=PLACE_SELL, 3=CANCEL_BUY, 4=CANCEL_SELL
     #   price_offset_idx ∈ {0..6} → offsets {-3..+3} * price_offset_pct_step around mid
     #   qty_idx ∈ {0..2} → fractions {0.25, 0.5, 1.0} of max_cash_fraction_per_trade / position_units
     price_offset_pct_step: float = 0.002  # ~0.2% per offset step around mid
@@ -126,9 +126,9 @@ class GEEnv(gym.Env):
         if not self._item_to_bucket:
             raise ValueError(f"buy_limit_csv has no rows: {self.cfg.buy_limit_csv}")
 
-        # Action (v2.0): [candidate_index, act_type, price_offset_idx, qty_idx]
-        # act_type: 0=HOLD, 1=PLACE_BUY, 2=PLACE_SELL
-        self.action_space = spaces.MultiDiscrete([self.cfg.max_candidates, 3, 7, 3])
+        # Action (v2.1): [candidate_index, act_type, price_offset_idx, qty_idx]
+        # act_type: 0=HOLD, 1=PLACE_BUY, 2=PLACE_SELL, 3=CANCEL_BUY, 4=CANCEL_SELL
+        self.action_space = spaces.MultiDiscrete([self.cfg.max_candidates, 5, 7, 3])
         self._price_offset_grid = np.array([-3, -2, -1, 0, 1, 2, 3], dtype=np.int32)
         self._qty_grid = np.array([0.25, 0.5, 1.0], dtype=np.float32)
 
@@ -175,6 +175,31 @@ class GEEnv(gym.Env):
         """Full dataframe slice for this timestamp (all items). Use for MTM and liquidation, not obs."""
         ts = self.times[time_idx]
         return self.df[self.df["parsed_utc"] == ts]
+
+    def _get_position_mid_from_slice(
+        self, slice_df: pd.DataFrame
+    ) -> Tuple[Optional[float], bool, int]:
+        """Get mid price for position_item from slice. Returns (mid, used_fallback, match_count).
+        Uses strict int match; only one row should match per (timestamp, item_id) in clean data."""
+        if self.position_item is None or slice_df.empty:
+            return (self.last_pos_price, True, 0)
+        # Drop rows with missing item_id so we don't match wrong
+        clean = slice_df.dropna(subset=["item_id"])
+        if clean.empty:
+            return (self.last_pos_price, True, 0)
+        pid = int(self.position_item)
+        try:
+            match = clean.loc[clean["item_id"].astype(int) == pid]
+        except (TypeError, ValueError):
+            return (self.last_pos_price, True, 0)
+        n = len(match)
+        if n == 0:
+            return (self.last_pos_price, True, 0)
+        mid_val = float(match.iloc[0]["mid"])
+        if n > 1:
+            # Duplicate (ts, item_id) rows: take first, caller can log
+            pass
+        return (mid_val, False, n)
 
     def _snapshot(self, time_idx: int) -> pd.DataFrame:
         # time_idx is index into self.times
@@ -231,10 +256,11 @@ class GEEnv(gym.Env):
         pos_units_norm = self.position_units / 1_000_000.0  # arbitrary scale
         pos_mid_norm = 0.0
         if self.position_item is not None:
-            # mark-to-market using current snapshot if present
-            match = snap[snap["item_id"].astype(int) == int(self.position_item)]
-            if not match.empty:
-                pos_mid_norm = float(match.iloc[0]["mid"]) / max(med, 1e-9)
+            # Use full slice so position item is always findable (not just top-N candidates)
+            full_at_t = self._full_slice(self.t)
+            pos_mid_val, _, _ = self._get_position_mid_from_slice(full_at_t)
+            if pos_mid_val is not None and pos_mid_val > 0:
+                pos_mid_norm = pos_mid_val / max(med, 1e-9)
 
         # resting order features (single-slot: 1 active buy + 1 active sell)
         has_active_buy = 1.0 if self.active_buy is not None else 0.0
@@ -296,27 +322,27 @@ class GEEnv(gym.Env):
     def _net_worth(self, slice_df: pd.DataFrame) -> float:
         worth = self.cash
         if self.position_item is not None and self.position_units > 0:
-            match = slice_df[slice_df["item_id"].astype(int) == int(self.position_item)]
-            if not match.empty:
-                price = float(match.iloc[0]["mid"])
-                self.last_pos_price = price
+            price, used_fallback, match_count = self._get_position_mid_from_slice(slice_df)
+            if price is not None:
+                if match_count == 1:
+                    self.last_pos_price = price
                 worth += price * self.position_units
-            elif self.last_pos_price is not None:
-                worth += self.last_pos_price * self.position_units
         return float(worth)
 
     def _force_liquidate(self, slice_df: pd.DataFrame) -> None:
         """Sell any open position at bid, applying sell tax. Uses full slice so item is findable."""
         if self.position_item is None or self.position_units <= 0:
             return
-        match = slice_df[slice_df["item_id"].astype(int) == int(self.position_item)]
+        mid, used_fallback, _ = self._get_position_mid_from_slice(slice_df)
+        if mid is None and self.last_pos_price is not None:
+            mid = self.last_pos_price
         bid: Optional[float] = None
-        if not match.empty:
-            mid = float(match.iloc[0]["mid"])
-            sp = float(match.iloc[0].get("spread_pct", self.cfg.min_spread_pct_floor))
+        if mid is not None:
+            # Use spread from slice if we have a match for this item
+            clean = slice_df.dropna(subset=["item_id"])
+            match = clean.loc[clean["item_id"].astype(int) == int(self.position_item)] if not clean.empty else pd.DataFrame()
+            sp = float(match.iloc[0].get("spread_pct", self.cfg.min_spread_pct_floor)) if len(match) > 0 else self.cfg.min_spread_pct_floor
             bid, _ = self._bid_ask(mid, sp)
-        elif self.last_pos_price is not None:
-            bid, _ = self._bid_ask(self.last_pos_price, self.cfg.min_spread_pct_floor)
         if bid is None:
             return
         proceeds = self.position_units * bid
@@ -442,21 +468,21 @@ class GEEnv(gym.Env):
         price_offset_idx = int(action[2])
         qty_idx = int(action[3])
 
-        # Override obviously invalid actions to HOLD so the agent focuses on trading, not "don't be dumb"
+        # Context-invalid actions → auto-HOLD, no blocked_reason (so they don't pollute "blocked" stats or penalty)
         blocked_reason: Optional[str] = None
         if act_type == 2 and (self.position_item is None or self.position_units <= 0):
-            blocked_reason = "sell_blocked_no_position"
-            act_type = 0
+            act_type = 0  # SELL when no position
         elif act_type == 1 and self.position_item is not None:
-            blocked_reason = "buy_blocked_already_in_position"
-            act_type = 0
-
-        # single-slot v2.0: block if an order already exists on that side
+            act_type = 0  # BUY when already in position
         if act_type == 1 and self.active_buy is not None:
-            blocked_reason = "buy_blocked_active_order"
-            act_type = 0
+            act_type = 0  # PLACE_BUY when buy order already resting
         if act_type == 2 and self.active_sell is not None:
-            blocked_reason = "sell_blocked_active_order"
+            act_type = 0  # PLACE_SELL when sell order already resting
+
+        # v2.1: CANCEL — no order to cancel → treat as HOLD (no blocked_reason)
+        if act_type == 3 and self.active_buy is None:
+            act_type = 0
+        if act_type == 4 and self.active_sell is None:
             act_type = 0
 
         snap = self._snapshot(self.t)
@@ -476,7 +502,24 @@ class GEEnv(gym.Env):
         price_offset = int(self._price_offset_grid[price_offset_idx % len(self._price_offset_grid)])
         qty_frac = float(self._qty_grid[qty_idx % len(self._qty_grid)])
 
-        if act_type == 1:  # PLACE_BUY: post resting buy offer at limit price
+        if act_type == 3:  # CANCEL_BUY: release order and return unfilled qty to 4h limit
+            if self.active_buy is not None:
+                item_id_b = int(self.active_buy.get("item_id", -1))
+                qty_rem = int(self.active_buy.get("qty_remaining", 0))
+                if item_id_b in self._item_to_bucket and qty_rem > 0:
+                    bucket_id = self._item_to_bucket[item_id_b]
+                    bought, start_ts = self._buy_window.get(bucket_id, (0, self.times[self.t]))
+                    new_bought = max(0, int(bought) - qty_rem)
+                    self._buy_window[bucket_id] = (new_bought, start_ts)
+                self.active_buy = None
+                executed = "CANCEL_BUY"
+
+        elif act_type == 4:  # CANCEL_SELL: clear resting sell (position was never deducted on place)
+            if self.active_sell is not None:
+                self.active_sell = None
+                executed = "CANCEL_SELL"
+
+        elif act_type == 1:  # PLACE_BUY: post resting buy offer at limit price
             if item_id == -1 or mid <= 0 or self.cash <= 0 or qty_frac <= 0.0:
                 if item_id == -1 or mid <= 0:
                     blocked_reason = blocked_reason or "buy_blocked_invalid_item_or_price"
@@ -573,7 +616,8 @@ class GEEnv(gym.Env):
         self.step_index += 1
         done = (self.t >= self.t0 + self.cfg.episode_len)
 
-        worth_time_idx = self.t - 1 if done else self.t
+        # Use same timestamp as logged step_ts so valuation and trace refer to the same moment (no off-by-one).
+        worth_time_idx = self.t - 1
         worth_slice = self._full_slice(worth_time_idx)
         if done:
             self._force_liquidate(worth_slice)
@@ -599,16 +643,44 @@ class GEEnv(gym.Env):
 
         # Debug / eval: timestamp and acted-on item/price, position mark (for Episode 0 trace)
         step_ts = self.times[self.t - 1]
-        pos_mid = None
-        if self.position_item is not None and not worth_slice.empty:
-            match = worth_slice[worth_slice["item_id"].astype(int) == int(self.position_item)]
-            if not match.empty:
-                pos_mid = float(match.iloc[0]["mid"])
-            elif self.last_pos_price is not None:
-                pos_mid = self.last_pos_price
+        pos_mid_val, pos_mid_used_fallback, pos_mid_match_count = self._get_position_mid_from_slice(worth_slice)
+        pos_mid = pos_mid_val
+
+        # acted_mid must match acted_item_id (BUY = candidate item, SELL = held item); use worth_slice for both
+        acted_mid: Optional[float] = None
+        if acted_item_id_for_info >= 0 and not worth_slice.empty:
+            clean = worth_slice.dropna(subset=["item_id"])
+            match = clean.loc[clean["item_id"].astype(int) == acted_item_id_for_info]
+            if len(match) > 0:
+                acted_mid = float(match.iloc[0]["mid"])
+
+        worth_ts = self.times[worth_time_idx]
+
+        # Suspicious valuation: only when we have a position and match/fallback suggest a real bug.
+        valuation_debug = None
+        in_position = self.position_item is not None and self.position_units > 0
+        suspicious = in_position and (pos_mid_match_count != 1 or pos_mid_used_fallback)
+        if suspicious and not worth_slice.empty:
+            clean_ws = worth_slice.dropna(subset=["item_id"])
+            rows_pos = clean_ws.loc[clean_ws["item_id"].astype(int) == int(self.position_item)] if self.position_item is not None else pd.DataFrame()
+            rows_acted = clean_ws.loc[clean_ws["item_id"].astype(int) == acted_item_id_for_info] if acted_item_id_for_info >= 0 else pd.DataFrame()
+            valuation_debug = {
+                "step_ts": str(step_ts),
+                "worth_ts": str(worth_ts),
+                "position_item": self.position_item,
+                "acted_item_id": acted_item_id_for_info,
+                "acted_mid": acted_mid,
+                "pos_mid": pos_mid,
+                "pos_mid_match_count": pos_mid_match_count,
+                "pos_mid_used_fallback": pos_mid_used_fallback,
+                "matched_rows_position": rows_pos.head(3).to_dict("records") if len(rows_pos) > 0 else [],
+                "matched_rows_acted": rows_acted.head(3).to_dict("records") if len(rows_acted) > 0 else [],
+            }
 
         info = {"net_worth": new_worth, "cash": self.cash, "pos_item": self.position_item, "pos_units": self.position_units}
         info["action"] = act_type
+        info["worth_ts"] = worth_ts
+        info["valuation_debug"] = valuation_debug
         info["in_position"] = bool(self.position_item is not None)
         info["pos_item"] = int(self.position_item) if self.position_item is not None else -1
         info["pos_units"] = float(self.position_units)
@@ -616,12 +688,16 @@ class GEEnv(gym.Env):
         info["net_worth"] = float(new_worth)
         info["parsed_utc"] = step_ts
         info["acted_item_id"] = acted_item_id_for_info
-        info["acted_mid"] = mid
+        info["acted_mid"] = acted_mid
         info["pos_item_id"] = int(self.position_item) if self.position_item is not None else -1
         info["pos_mid"] = pos_mid  # mark price of position after step (None if no position)
+        info["pos_mid_used_fallback"] = pos_mid_used_fallback
+        info["pos_mid_match_count"] = pos_mid_match_count
         info["executed"] = executed
         info["buy_filled"] = int(buy_filled)
         info["sell_filled"] = int(sell_filled)
+        info["has_active_buy"] = self.active_buy is not None
+        info["has_active_sell"] = self.active_sell is not None
         if exec_price is not None:
             info["exec_price"] = exec_price
         if realized_pnl is not None:

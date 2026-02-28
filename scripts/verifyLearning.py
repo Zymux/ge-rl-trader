@@ -36,15 +36,21 @@ def make_env(ts_path: str):
 
 
 def run_policy(venv, model, n_episodes: int):
-    """Run trained policy; return final_equities, trade_counts, blocked_reasons (all episodes)."""
+    """Run trained policy; return final_equities, trade_counts, blocked_reasons, fill_stats per episode."""
     final_equities = []
     trade_counts = []
     all_blocked = []
+    fill_stats_list = []
     for _ in range(n_episodes):
         obs = venv.reset()
         done_arr = np.array([False])
         trades = 0
         last_info = None
+        total_buy_filled = 0
+        total_sell_filled = 0
+        steps_active_buy = 0
+        steps_active_sell = 0
+        n_steps = 0
         while not done_arr.any():
             action, _ = model.predict(obs, deterministic=True)
             obs, _, done_arr, info = venv.step(action)
@@ -53,12 +59,28 @@ def run_policy(venv, model, n_episodes: int):
             ex = info0.get("executed", "NONE")
             if ex in ("BUY", "SELL"):
                 trades += 1
+            elif ex == "BUY_SELL":
+                trades += 2
             if info0.get("blocked_reason"):
                 all_blocked.append(info0["blocked_reason"])
+            total_buy_filled += info0.get("buy_filled", 0)
+            total_sell_filled += info0.get("sell_filled", 0)
+            if info0.get("has_active_buy"):
+                steps_active_buy += 1
+            if info0.get("has_active_sell"):
+                steps_active_sell += 1
+            n_steps += 1
         if last_info and "net_worth" in last_info:
             final_equities.append(last_info["net_worth"] / STARTING_CASH)
         trade_counts.append(trades)
-    return final_equities, trade_counts, all_blocked
+        fill_stats_list.append({
+            "buy_filled_qty": total_buy_filled,
+            "sell_filled_qty": total_sell_filled,
+            "steps_active_buy": steps_active_buy,
+            "steps_active_sell": steps_active_sell,
+            "n_steps": n_steps,
+        })
+    return final_equities, trade_counts, all_blocked, fill_stats_list
 
 
 def run_baseline_hold(venv, n_episodes: int):
@@ -181,7 +203,7 @@ def main():
     print("=" * 60)
     print("1) POLICY (trained PPO)")
     print("=" * 60)
-    eq, trades, blocked = run_policy(venv, model, n)
+    eq, trades, blocked, fill_stats = run_policy(venv, model, n)
     eq_arr = np.array(eq)
     trade_arr = np.array(trades)
     print(f"   Final equity: mean={eq_arr.mean():.4f} std={eq_arr.std():.4f} min={eq_arr.min():.4f} max={eq_arr.max():.4f}")
@@ -191,6 +213,14 @@ def main():
         print(f"   Blocked reasons (total): {dict(counts)}")
     else:
         print("   Blocked reasons: none")
+    # Fill stats (v2: are we actually flipping?)
+    if fill_stats:
+        mean_buy = np.mean([s["buy_filled_qty"] for s in fill_stats])
+        mean_sell = np.mean([s["sell_filled_qty"] for s in fill_stats])
+        pct_active_buy = np.mean([s["steps_active_buy"] / max(s["n_steps"], 1) * 100 for s in fill_stats])
+        pct_active_sell = np.mean([s["steps_active_sell"] / max(s["n_steps"], 1) * 100 for s in fill_stats])
+        print(f"   Fill stats/ep: total buy_filled mean={mean_buy:.1f}  total sell_filled mean={mean_sell:.1f}")
+        print(f"   Order state: % steps with active buy={pct_active_buy:.1f}%  % steps with active sell={pct_active_sell:.1f}%")
 
     print()
     print("2) BASELINES (same env, same episodes)")

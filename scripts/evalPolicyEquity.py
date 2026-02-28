@@ -12,6 +12,8 @@ from src.geEnv import GEEnv, GEEnvConfig
 TS_PATH = "data/timeseries/ge_item_timeseries.csv"
 STARTING_CASH = 10_000_000.0
 EPISODE_LEN = 75
+MODEL_PATH = "docs/assets/ppo_ge_trader/model.zip"
+VECNORM_PATH = "docs/assets/ppo_ge_trader/vecnormalize.pkl"
 
 
 def make_env():
@@ -48,9 +50,11 @@ def check_timeseries(ts_path: str) -> None:
 def main():
     check_timeseries(TS_PATH)
 
-    model = PPO.load("docs/assets/ppo_ge_trader/model.zip")
+    # Same model/vecnorm as verifyLearning by default; same GEEnv code version.
+    print(f"[Config] Model: {MODEL_PATH}  VecNorm: {VECNORM_PATH}  TS: {TS_PATH}\n")
+    model = PPO.load(MODEL_PATH)
     venv = DummyVecEnv([make_env])
-    venv = VecNormalize.load("docs/assets/ppo_ge_trader/vecnormalize.pkl", venv)
+    venv = VecNormalize.load(VECNORM_PATH, venv)
     venv.training = False
     venv.norm_reward = False
 
@@ -70,6 +74,8 @@ def main():
         step_trace = []
         inventory_values = []
         traded_item_mids = []
+        # Episode 0: valuation sanity (pos_mid vs mid range for held item)
+        pos_mid_by_item = {}  # item_id -> list of pos_mid values seen
         # Episode 0: count requested vs executed and blocked reasons
         requested_non_hold = 0
         executed_buys = 0
@@ -89,6 +95,10 @@ def main():
             elif ex == "SELL":
                 executed_sells += 1
                 trades += 1
+            elif ex == "BUY_SELL":
+                executed_buys += 1
+                executed_sells += 1
+                trades += 2
             if info0.get("action", 0) != 0:
                 requested_non_hold += 1
             if info0.get("blocked_reason"):
@@ -110,12 +120,33 @@ def main():
                         "acted_mid": info0.get("acted_mid"),
                         "pos_item_id": info0.get("pos_item_id", info0.get("pos_item", -1)),
                         "pos_mid": info0.get("pos_mid"),
+                        "pos_mid_match_count": info0.get("pos_mid_match_count"),
+                        "pos_mid_used_fallback": info0.get("pos_mid_used_fallback"),
                         "exec_price": info0.get("exec_price"),
                         "realized_pnl": info0.get("realized_pnl"),
                         "cash": info0.get("cash"),
                         "pos_units": info0.get("pos_units") or 0,
                         "net_worth": info0.get("net_worth"),
                     })
+                # Track pos_mid per held item for valuation sanity (all steps, not just trace)
+                pid = info0.get("pos_item_id", info0.get("pos_item", -1))
+                pm = info0.get("pos_mid")
+                if ep == 0 and pid != -1 and pm is not None:
+                    if pid not in pos_mid_by_item:
+                        pos_mid_by_item[pid] = []
+                    pos_mid_by_item[pid].append(pm)
+                # Dump valuation debug when env flagged suspicious (step_ts vs worth_ts, matched rows)
+                vdb = info0.get("valuation_debug")
+                if ep == 0 and vdb is not None:
+                    print("\n[VALUATION DEBUG] suspicious step (step_ts vs worth_ts, matched rows):")
+                    print("  step_ts:", vdb.get("step_ts"), "  worth_ts:", vdb.get("worth_ts"))
+                    print("  position_item:", vdb.get("position_item"), "  acted_item_id:", vdb.get("acted_item_id"))
+                    print("  acted_mid:", vdb.get("acted_mid"), "  pos_mid:", vdb.get("pos_mid"))
+                    print("  pos_mid_match_count:", vdb.get("pos_mid_match_count"), "  pos_mid_used_fallback:", vdb.get("pos_mid_used_fallback"))
+                    if vdb.get("matched_rows_position"):
+                        print("  matched_rows (position_item):", vdb["matched_rows_position"])
+                    if vdb.get("matched_rows_acted"):
+                        print("  matched_rows (acted_item_id):", vdb["matched_rows_acted"])
 
         if last_info is not None and "net_worth" in last_info:
             final_equities.append(last_info["net_worth"] / STARTING_CASH)
@@ -176,11 +207,47 @@ def main():
             print(
                 f"[Episode 0] requested (non-HOLD) actions: {requested_non_hold}  "
                 f"executed BUY: {executed_buys}  executed SELL: {executed_sells}  "
-                f"(trades = executed only: {executed_buys + executed_sells})"
+                f"trades (fill events): {trades}"
             )
             if blocked_reasons:
                 counts = Counter(blocked_reasons)
                 print("[Episode 0] blocked_reason counts:", dict(counts))
+            # Valuation sanity: pos_mid range for held item(s) vs acted_mid range
+            if pos_mid_by_item and traded_item_mids:
+                mids_per_item = {}
+                for iid, m in traded_item_mids:
+                    if iid not in mids_per_item:
+                        mids_per_item[iid] = []
+                    mids_per_item[iid].append(m)
+                print("[Episode 0] Valuation (pos_mid vs acted_mid for same item):")
+                for pid in sorted(pos_mid_by_item.keys()):
+                    pos_mids = pos_mid_by_item[pid]
+                    acted = mids_per_item.get(pid, [])
+                    max_acted = max(acted) if acted else None
+                    min_acted = min(acted) if acted else None
+                    max_pos = max(pos_mids)
+                    min_pos = min(pos_mids)
+                    acted_str = "%.2f, %.2f" % (min_acted, max_acted) if acted else "—"
+                    if max_acted is not None and max_pos > max_acted * 1.1:
+                        pct = 100.0 * (max_pos / max_acted - 1.0)
+                        print(
+                            "  item_id=%s  pos_mid [%.2f, %.2f]  acted_mid [%s]  "
+                            "-> repriced +%.0f%% (MTM / regime change)"
+                            % (pid, min_pos, max_pos, acted_str, pct)
+                        )
+                    elif min_acted is not None and min_pos < min_acted * 0.9:
+                        pct = 100.0 * (min_pos / min_acted - 1.0)
+                        print(
+                            "  item_id=%s  pos_mid [%.2f, %.2f]  acted_mid [%s]  "
+                            "-> repriced %.0f%% (MTM / regime change)"
+                            % (pid, min_pos, max_pos, acted_str, pct)
+                        )
+                    else:
+                        print("  item_id=%s  pos_mid [%.2f, %.2f]  acted_mid [%s]  OK" % (
+                            pid, min_pos, max_pos, acted_str,
+                        ))
+            elif pos_mid_by_item:
+                print("[Episode 0] pos_mid range by held item (no acted_mid to compare):", {k: (min(v), max(v)) for k, v in pos_mid_by_item.items()})
             print()
 
     print(f"Episodes: {n_episodes}")
