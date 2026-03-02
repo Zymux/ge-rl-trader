@@ -113,6 +113,36 @@ After these fixes:
 
 ---
 
+### v2 Baseline (Resting Orders, Partial Fills, Sell Sanity)
+
+![PPO Evaluation Returns – v2 Baseline](docs/assets/ppo_training_returns_4.png)
+
+**Environment (v2 / v2.1)**
+- Resting buy/sell offers with probabilistic partial fills; discrete price offsets; single active buy + single active sell; CANCEL_BUY / CANCEL_SELL. No instant mid execution.
+- Valuation: single source of truth from full slice; acted_mid matches acted_item_id; off-by-one fixed.
+
+**Sell behavior (before vs after blocked-sell penalties)**
+| Metric | Before penalties | After penalties |
+|--------|-------------------|------------------|
+| requested SELL | 785 | 697 |
+| executed SELL (fills) | 203 | 181 |
+| rejected (blocked) | 510 | **91** |
+| sell_blocked_active_order | dominant | 88 |
+| sell_blocked_no_position | — | 3 |
+
+- Blocked sells collapsed from ~65% to ~13% of requested SELL. Policy stopped spamming SELL when a sell was already resting; reward shaping (small penalties for sell_blocked_active_order and sell_blocked_no_position) worked.
+
+**Valuation**
+- Valuation (pos_mid vs acted_mid for same item): OK. Large reprices (e.g. 8k → 73k) are data-driven MTM/regime change, not bugs. Debug logic no longer falsely panics; valuation path is a single source of truth.
+
+**Equity profile (50 episodes)**
+- Final equity mean **1.019**, std **0.093**, min/max **0.86 / 1.33**.
+- Realistic flipping agent: some bad runs, some big wins, mean slightly positive, no guaranteed arbitrage. Tighter variance and inflated mean would suggest instant execution; this profile matches v2 microstructure.
+
+This is locked as a good v2 baseline (potentially v2.2) and a solid position for further training and robustness (seeds, OOS eval, fill logic on full slice).
+
+---
+
 ### Out-of-Sample Evaluation
 
 The trained policy was evaluated on a **held-out time range** not used during training.

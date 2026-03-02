@@ -92,6 +92,12 @@
 - Verified strong out-of-sample performance
 - Explicitly mapped missing GE mechanics to OSRS Wiki
 
+### v2 baseline lock (resting orders, partial fills, sell sanity)
+- **V2 microstructure**: Resting buy/sell offers, probabilistic partial fills, discrete price offsets; single active buy + single active sell; CANCEL_BUY / CANCEL_SELL (v2.1). No instant mid execution.
+- **Valuation**: Single source of truth via `_get_position_mid_from_slice()`; full slice for MTM; off-by-one fixed (worth_ts = step_ts). acted_mid now matches acted_item_id (BUY = candidate mid, SELL = held-item mid from same slice). Valuation sanity treats large reprices as MTM/regime change, not bugs.
+- **Sell sanity**: evalPolicyEquity counts requested SELL, executed SELL (fills), rejected (blocked) with `sell_blocked_*` histogram. Blocked overrides (no position, active order) set consistent prefixes and small feasibility penalties.
+- **Blocked-sell penalties**: `sell_blocked_active_order` → -0.001; `sell_blocked_no_position` → -0.003. Reduces SELL spam; blocked sells dropped from ~65% to ~13% of requested SELL.
+- **Results (post-penalties, 50 eps)**: requested SELL 697, executed SELL 181, rejected 91 (sell_blocked_active_order 88, sell_blocked_no_position 3). Valuation (pos_mid vs acted_mid): OK. Final equity mean 1.019, std 0.093, min/max 0.86 / 1.33 — realistic flipping profile. Locked as good v2 baseline (potentially v2.2).
 
 
 ## PENDING: 

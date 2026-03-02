@@ -468,15 +468,17 @@ class GEEnv(gym.Env):
         price_offset_idx = int(action[2])
         qty_idx = int(action[3])
 
-        # Context-invalid actions → auto-HOLD, no blocked_reason (so they don't pollute "blocked" stats or penalty)
+        # Context-invalid actions → auto-HOLD; set blocked_reason for sell diagnostic (no penalty: act_type→0)
         blocked_reason: Optional[str] = None
         if act_type == 2 and (self.position_item is None or self.position_units <= 0):
+            blocked_reason = "sell_blocked_no_position"
             act_type = 0  # SELL when no position
         elif act_type == 1 and self.position_item is not None:
             act_type = 0  # BUY when already in position
         if act_type == 1 and self.active_buy is not None:
             act_type = 0  # PLACE_BUY when buy order already resting
         if act_type == 2 and self.active_sell is not None:
+            blocked_reason = "sell_blocked_active_order"
             act_type = 0  # PLACE_SELL when sell order already resting
 
         # v2.1: CANCEL — no order to cancel → treat as HOLD (no blocked_reason)
@@ -640,6 +642,11 @@ class GEEnv(gym.Env):
             reward -= INVALID_ACTION_PENALTY
         else:
             reward -= HOLD_PENALTY
+        # Reduce SELL spam: small penalty when SELL was requested but blocked (nudge feasibility)
+        if blocked_reason == "sell_blocked_active_order":
+            reward -= 0.001   # sell already resting → prefer HOLD or CANCEL_SELL
+        elif blocked_reason == "sell_blocked_no_position":
+            reward -= 0.003   # no position → prefer HOLD or PLACE_BUY
 
         # Debug / eval: timestamp and acted-on item/price, position mark (for Episode 0 trace)
         step_ts = self.times[self.t - 1]

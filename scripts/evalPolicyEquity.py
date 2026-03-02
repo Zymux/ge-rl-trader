@@ -61,6 +61,11 @@ def main():
     n_episodes = 50
     final_equities = []
     trade_counts = []
+    total_requested_buys = 0
+    total_requested_sells = 0
+    total_executed_buys = 0
+    total_executed_sells = 0
+    all_blocked_sell_reasons = []
 
     TRACE_STEPS = 20  # first N steps of Episode 0 to print
 
@@ -78,12 +83,21 @@ def main():
         pos_mid_by_item = {}  # item_id -> list of pos_mid values seen
         # Episode 0: count requested vs executed and blocked reasons
         requested_non_hold = 0
+        requested_buys = 0
+        requested_sells = 0
         executed_buys = 0
         executed_sells = 0
         blocked_reasons = []
+        blocked_sell_reasons = []  # when policy asked for SELL but execution failed
 
         while not done_arr.any():
             action, _ = model.predict(obs, deterministic=True)
+            raw_act_type = int(action[0][1])  # 0=HOLD, 1=PLACE_BUY, 2=PLACE_SELL, 3=CANCEL_BUY, 4=CANCEL_SELL
+            if raw_act_type == 1:
+                requested_buys += 1
+            elif raw_act_type == 2:
+                requested_sells += 1
+
             obs, reward, done_arr, info = venv.step(action)
             info0 = info[0]
             last_info = info0
@@ -103,6 +117,8 @@ def main():
                 requested_non_hold += 1
             if info0.get("blocked_reason"):
                 blocked_reasons.append(info0["blocked_reason"])
+                if raw_act_type == 2 and str(info0["blocked_reason"]).startswith("sell_blocked"):
+                    blocked_sell_reasons.append(info0["blocked_reason"])
             if "net_worth" in info0:
                 step_equities.append(info0["net_worth"])
             # Collect Episode 0 trace (first TRACE_STEPS only) and stats
@@ -151,6 +167,11 @@ def main():
         if last_info is not None and "net_worth" in last_info:
             final_equities.append(last_info["net_worth"] / STARTING_CASH)
         trade_counts.append(trades)
+        total_requested_buys += requested_buys
+        total_requested_sells += requested_sells
+        total_executed_buys += executed_buys
+        total_executed_sells += executed_sells
+        all_blocked_sell_reasons.extend(blocked_sell_reasons)
 
         # Episode 0: per-step trace (first TRACE_STEPS) and summary stats
         if ep == 0:
@@ -209,6 +230,13 @@ def main():
                 f"executed BUY: {executed_buys}  executed SELL: {executed_sells}  "
                 f"trades (fill events): {trades}"
             )
+            # Sell sanity: are sells chosen? executed? blocked?
+            print(
+                f"[Episode 0] Sell sanity: requested SELL: {requested_sells}  "
+                f"executed SELL (fills): {executed_sells}  rejected (blocked): {len(blocked_sell_reasons)}"
+            )
+            if blocked_sell_reasons:
+                print("[Episode 0] blocked_sell_reason counts:", dict(Counter(blocked_sell_reasons)))
             if blocked_reasons:
                 counts = Counter(blocked_reasons)
                 print("[Episode 0] blocked_reason counts:", dict(counts))
@@ -254,6 +282,17 @@ def main():
     print(f"Final equity mean: {np.mean(final_equities):.4f}  std: {np.std(final_equities):.4f}")
     print(f"Final equity min/max: {np.min(final_equities):.4f} / {np.max(final_equities):.4f}")
     print(f"Executed trades per ep mean: {np.mean(trade_counts):.2f}  min/max: {np.min(trade_counts)} / {np.max(trade_counts)}")
+    # Sell sanity (all episodes): policy choosing sells? env executing them?
+    print(
+        f"\nSell sanity (all episodes): requested SELL: {total_requested_sells}  "
+        f"executed SELL (fills): {total_executed_sells}  rejected (blocked): {len(all_blocked_sell_reasons)}"
+    )
+    if total_requested_sells == 0:
+        print("  -> Policy is not requesting SELL (action type 2). Train longer or check action space.")
+    elif total_executed_sells == 0 and total_requested_sells > 0:
+        print("  -> Policy requests SELL but no fills; check env execution / fill logic or blocked reasons.")
+    if all_blocked_sell_reasons:
+        print("  blocked_sell_reason counts:", dict(Counter(all_blocked_sell_reasons)))
 
 if __name__ == "__main__":
     main()
