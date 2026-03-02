@@ -92,6 +92,8 @@
 - Verified strong out-of-sample performance
 - Explicitly mapped missing GE mechanics to OSRS Wiki
 
+## 2026-03-01
+
 ### v2 baseline lock (resting orders, partial fills, sell sanity)
 - **V2 microstructure**: Resting buy/sell offers, probabilistic partial fills, discrete price offsets; single active buy + single active sell; CANCEL_BUY / CANCEL_SELL (v2.1). No instant mid execution.
 - **Valuation**: Single source of truth via `_get_position_mid_from_slice()`; full slice for MTM; off-by-one fixed (worth_ts = step_ts). acted_mid now matches acted_item_id (BUY = candidate mid, SELL = held-item mid from same slice). Valuation sanity treats large reprices as MTM/regime change, not bugs.
