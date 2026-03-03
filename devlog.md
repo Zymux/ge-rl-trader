@@ -92,7 +92,7 @@
 - Verified strong out-of-sample performance
 - Explicitly mapped missing GE mechanics to OSRS Wiki
 
-## 2026-03-01
+## 2026-03-01 -
 
 ### v2 baseline lock (resting orders, partial fills, sell sanity)
 - **V2 microstructure**: Resting buy/sell offers, probabilistic partial fills, discrete price offsets; single active buy + single active sell; CANCEL_BUY / CANCEL_SELL (v2.1). No instant mid execution.
@@ -101,6 +101,14 @@
 - **Blocked-sell penalties**: `sell_blocked_active_order` → -0.001; `sell_blocked_no_position` → -0.003. Reduces SELL spam; blocked sells dropped from ~65% to ~13% of requested SELL.
 - **Results (post-penalties, 50 eps)**: requested SELL 697, executed SELL 181, rejected 91 (sell_blocked_active_order 88, sell_blocked_no_position 3). Valuation (pos_mid vs acted_mid): OK. Final equity mean 1.019, std 0.093, min/max 0.86 / 1.33 — realistic flipping profile. Locked as good v2 baseline (potentially v2.2).
 
+
+## 2026-03-02 - 
+
+### Market Context Collector (MVP)
+- Collected raw signals, no summarization or policy grouping
+- Data dervied from OSRS news and r/2007scape
+- Appended to JSONL for replayability, offline evaluation, and future embeddings/retrieval
+- 
 
 ## PENDING: 
 - Collecting 3+ hours of snapshots to increase unique timestamps for longer episodes

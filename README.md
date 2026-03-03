@@ -178,3 +178,43 @@ The current simulator uses instant mid-price execution and simplified mechanics.
 - More realistic fill dynamics
 
 This establishes a clean v1 baseline before introducing additional market complexity.
+
+---
+
+### News & context ingestion (MVP)
+
+To prepare for LLM-driven context features (patch notes, Reddit sentiment, etc.) there is a small
+news collector script that writes raw documents to JSONL for later processing.
+
+- **Script**: `scripts/news_collect.py`
+- **Sources (MVP)**:
+  - **Official OSRS news archive** (game update posts, dev blogs, etc.)
+  - **Reddit**: `r/2007scape` (`Update`, `News`, `PSA`, `Bug`, `Discussion` flairs)
+- **Schema per line (JSONL)**:
+  - `source`
+  - `fetched_utc`
+  - `published_utc` (if known)
+  - `title`
+  - `text`
+  - `url`
+  - `score`
+  - `num_comments`
+
+**How to run (example for today in UTC):**
+
+```bash
+python -m scripts.news_collect
+```
+
+Or to explicitly target a date:
+
+```bash
+python -m scripts.news_collect --date 2026-03-02
+```
+
+This will create a folder like:
+
+- `data/news/raw/2026-03-02/official_osrs.jsonl`
+- `data/news/raw/2026-03-02/reddit_2007scape.jsonl`
+
+Each file is a JSONL with one document per line, ready for downstream event + item extraction.
