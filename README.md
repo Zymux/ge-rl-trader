@@ -186,7 +186,7 @@ This establishes a clean v1 baseline before introducing additional market comple
 To prepare for LLM-driven context features (patch notes, Reddit sentiment, etc.) there is a small
 news collector script that writes raw documents to JSONL for later processing.
 
-- **Script**: `scripts/news_collect.py`
+- **Script (collector)**: `scripts/newsCollect.py`
 - **Sources (MVP)**:
   - **Official OSRS news archive** (game update posts, dev blogs, etc.)
   - **Reddit**: `r/2007scape` (`Update`, `News`, `PSA`, `Bug`, `Discussion` flairs)
@@ -203,13 +203,13 @@ news collector script that writes raw documents to JSONL for later processing.
 **How to run (example for today in UTC):**
 
 ```bash
-python -m scripts.news_collect
+python -m scripts.newsCollect
 ```
 
 Or to explicitly target a date:
 
 ```bash
-python -m scripts.news_collect --date 2026-03-02
+python -m scripts.newsCollect --date 2026-03-02
 ```
 
 This will create a folder like:
@@ -218,3 +218,32 @@ This will create a folder like:
 - `data/news/raw/2026-03-02/reddit_2007scape.jsonl`
 
 Each file is a JSONL with one document per line, ready for downstream event + item extraction.
+
+### Event extraction & context card (MVP)
+
+The second step turns raw news into a structured context card with events, a watchlist and
+basic risk flags.
+
+- **Script (extractor)**: `scripts/news_extract.py`
+- **Config/mappings**:
+  - `data/mappings/style_to_items.json`: maps combat styles (e.g. `"magic"`, `"ranged"`, `"stab"`) to item_ids to bias as demand↑ when that style is implicated. Generated from the [OSRS Wiki Item IDs](https://oldschool.runescape.wiki/w/Item_IDs) page; regenerate with `python -m scripts.buildStyleToItems`.
+  - `data/mappings/item_name_to_id.json`: maps lowercased item names (e.g. `"abyssal whip"`) to item_ids for explicit mention detection.
+- **Output**:
+  - `data/news/derived/context_card_YYYY-MM-DD.json`
+
+**How to generate a context card for a given date:**
+
+```bash
+# 1) Collect raw docs
+python -m scripts.newsCollect --date 2026-03-02
+
+# 2) Turn them into a context card
+python -m scripts.newsExtract --date 2026-03-02
+```
+
+The context card contains:
+
+- `sources_seen` (counts for official vs reddit)
+- `events` (list of classified events with types like `NEW_BOSS`, `ITEM_NERF`, `BUG/HOTFIX`, etc.)
+- `watchlist` (candidate item_ids with a short reason and `expected_impact` like `demand_up` or `demand_down`)
+- `risk_flags` (e.g. `["hotfix_rolling", "bug_reports"]`)
