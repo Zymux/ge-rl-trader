@@ -1,6 +1,9 @@
 # Evaluate policy by final equity (not just reward).
 # Requires a time-series CSV: multiple timestamps and varying mid prices so PnL can occur.
+# Optional: --date YYYY-MM-DD loads risk_config_<date>.json and passes it to the env for the whole run.
 
+import argparse
+import json
 import numpy as np
 import pandas as pd
 from collections import Counter
@@ -14,13 +17,15 @@ STARTING_CASH = 10_000_000.0
 EPISODE_LEN = 75
 MODEL_PATH = "docs/assets/ppo_ge_trader/model.zip"
 VECNORM_PATH = "docs/assets/ppo_ge_trader/vecnormalize.pkl"
+DERIVED_ROOT = Path("data/news/derived")
 
 
-def make_env():
+def make_env(risk_config=None):
     cfg = GEEnvConfig(
         ts_path=TS_PATH,
         episode_len=EPISODE_LEN,
         starting_cash=STARTING_CASH,
+        risk_config=risk_config,
     )
     return GEEnv(cfg)
 
@@ -48,17 +53,32 @@ def check_timeseries(ts_path: str) -> None:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Evaluate policy equity; optional risk_config via --date.")
+    parser.add_argument("--date", type=str, default=None, help="Load risk_config_<date>.json from data/news/derived (applies for all episodes).")
+    parser.add_argument("--episodes", type=int, default=50, help="Number of eval episodes.")
+    args = parser.parse_args()
+
     check_timeseries(TS_PATH)
+
+    risk_config = None
+    if args.date:
+        rc_path = DERIVED_ROOT / f"risk_config_{args.date}.json"
+        if rc_path.exists():
+            with rc_path.open("r", encoding="utf-8") as f:
+                risk_config = json.load(f)
+            print(f"[Config] Using risk_config from {rc_path}")
+        else:
+            print(f"[Config] --date {args.date} but {rc_path} not found; running without risk_config.")
 
     # Same model/vecnorm as verifyLearning by default; same GEEnv code version.
     print(f"[Config] Model: {MODEL_PATH}  VecNorm: {VECNORM_PATH}  TS: {TS_PATH}\n")
     model = PPO.load(MODEL_PATH)
-    venv = DummyVecEnv([make_env])
+    venv = DummyVecEnv([lambda: make_env(risk_config=risk_config)])
     venv = VecNormalize.load(VECNORM_PATH, venv)
     venv.training = False
     venv.norm_reward = False
 
-    n_episodes = 50
+    n_episodes = args.episodes
     final_equities = []
     trade_counts = []
     total_requested_buys = 0
@@ -66,6 +86,11 @@ def main():
     total_executed_buys = 0
     total_executed_sells = 0
     all_blocked_sell_reasons = []
+    all_blocked_buy_reasons = []
+    spreads_when_trading = []
+    episode_drawdowns = []
+    total_buy_volume_gp = 0.0
+    total_sell_volume_gp = 0.0
 
     TRACE_STEPS = 20  # first N steps of Episode 0 to print
 
@@ -119,8 +144,16 @@ def main():
                 blocked_reasons.append(info0["blocked_reason"])
                 if raw_act_type == 2 and str(info0["blocked_reason"]).startswith("sell_blocked"):
                     blocked_sell_reasons.append(info0["blocked_reason"])
+                if raw_act_type == 1 and str(info0["blocked_reason"]).startswith("buy_blocked"):
+                    all_blocked_buy_reasons.append(info0["blocked_reason"])
             if "net_worth" in info0:
                 step_equities.append(info0["net_worth"])
+            if info0.get("executed") in ("BUY", "SELL", "BUY_SELL") and "spread_pct" in info0:
+                spreads_when_trading.append(float(info0["spread_pct"]))
+            if "buy_volume_gp" in info0:
+                total_buy_volume_gp += float(info0["buy_volume_gp"])
+            if "sell_volume_gp" in info0:
+                total_sell_volume_gp += float(info0["sell_volume_gp"])
             # Collect Episode 0 trace (first TRACE_STEPS only) and stats
             if ep == 0:
                 inv_qty = info0.get("pos_units", 0) or 0
@@ -172,6 +205,12 @@ def main():
         total_executed_buys += executed_buys
         total_executed_sells += executed_sells
         all_blocked_sell_reasons.extend(blocked_sell_reasons)
+        # max drawdown this episode (from equity curve)
+        if step_equities:
+            eq = np.array(step_equities, dtype=float)
+            peak = np.maximum.accumulate(eq)
+            dd = np.where(peak > 0, (peak - eq) / peak, 0.0)
+            episode_drawdowns.append(float(np.max(dd)))
 
         # Episode 0: per-step trace (first TRACE_STEPS) and summary stats
         if ep == 0:
@@ -293,6 +332,22 @@ def main():
         print("  -> Policy requests SELL but no fills; check env execution / fill logic or blocked reasons.")
     if all_blocked_sell_reasons:
         print("  blocked_sell_reason counts:", dict(Counter(all_blocked_sell_reasons)))
+
+    # --- Paper-grade metrics (for ablations) ---
+    print("\n--- Paper-grade metrics ---")
+    if spreads_when_trading:
+        avg_spread = np.mean(spreads_when_trading) * 100.0
+        print(f"  Avg spread when trading: {avg_spread:.4f}%")
+    else:
+        print("  Avg spread when trading: N/A (no trades)")
+    sell_rate = (len(all_blocked_sell_reasons) / total_requested_sells) if total_requested_sells else 0.0
+    buy_rate = (len(all_blocked_buy_reasons) / total_requested_buys) if total_requested_buys else 0.0
+    print(f"  Blocked sell rate: {sell_rate:.4f}  (blocked={len(all_blocked_sell_reasons)} requested={total_requested_sells})")
+    print(f"  Blocked buy rate:  {buy_rate:.4f}  (blocked={len(all_blocked_buy_reasons)} requested={total_requested_buys})")
+    if episode_drawdowns:
+        print(f"  Max drawdown (mean over episodes): {np.mean(episode_drawdowns):.4f}")
+    turnover = (total_buy_volume_gp + total_sell_volume_gp) / STARTING_CASH
+    print(f"  Turnover proxy (total gp traded / starting cash): {turnover:.4f}")
 
 if __name__ == "__main__":
     main()

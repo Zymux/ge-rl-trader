@@ -73,6 +73,9 @@ class GEEnvConfig:
     fill_slope: float = 5.0              # sigmoid slope for probabilistic fills
     seed: int = 123
 
+    # optional risk_config from context/risk manager (applied for whole episode; can also be set at reset via options)
+    risk_config: Optional[Dict[str, Any]] = None
+
 
 class GEEnv(gym.Env):
     metadata = {"render_modes": []}
@@ -161,6 +164,8 @@ class GEEnv(gym.Env):
         self.active_buy: Optional[Dict[str, Any]] = None
         self.active_sell: Optional[Dict[str, Any]] = None
         self.step_index: int = 0
+        # optional risk_config from context (from cfg or set at reset via options["risk_config"]); applied for whole episode
+        self._risk_config: Optional[Dict[str, Any]] = getattr(self.cfg, "risk_config", None)
 
     # ---------- helpers ----------
 
@@ -363,6 +368,12 @@ class GEEnv(gym.Env):
                 f"Not enough timestamps ({len(self.times)}) for episode_len={self.cfg.episode_len}"
             )
 
+        # optional risk_config: apply consistently for whole episode (from options or keep from cfg)
+        if options and isinstance(options.get("risk_config"), dict):
+            self._risk_config = options["risk_config"]
+        else:
+            self._risk_config = getattr(self.cfg, "risk_config", None)
+
         # choose random start so we have enough room for episode
         self.t0 = int(self.rng.integers(0, len(self.times) - self.cfg.episode_len))
         self.t = self.t0
@@ -495,13 +506,35 @@ class GEEnv(gym.Env):
         mid = float(row["mid"])
         spread_pct = float(row.get("spread_pct", self.cfg.min_spread_pct_floor))
 
+        # --- risk_config (from context card + risk manager): apply bounds for whole episode ---
+        rc = self._risk_config
+        if rc is not None:
+            if act_type in (1, 2) and spread_pct > float(rc.get("spread_guard_pct", 1.0)):
+                blocked_reason = blocked_reason or "risk_blocked_spread_guard"
+                act_type = 0
+            max_open = int(rc.get("max_open_orders", 2))
+            if max_open <= 1 and act_type == 1 and self.active_sell is not None:
+                blocked_reason = blocked_reason or "risk_blocked_max_open_orders"
+                act_type = 0
+            if max_open <= 1 and act_type == 2 and self.active_buy is not None:
+                blocked_reason = blocked_reason or "risk_blocked_max_open_orders"
+                act_type = 0
+            focus = rc.get("focus_items") or []
+            if focus and act_type == 1 and item_id >= 0 and item_id not in focus:
+                blocked_reason = blocked_reason or "risk_blocked_focus_items"
+                act_type = 0
+
         executed = "NONE"
         exec_price: Optional[float] = None
         realized_pnl: Optional[float] = None
         acted_item_id_for_info: int = item_id
 
-        # map discrete indices to offsets / qty fractions
+        # map discrete indices to offsets / qty fractions; risk_config can scale aggression (price distance from mid)
         price_offset = int(self._price_offset_grid[price_offset_idx % len(self._price_offset_grid)])
+        aggression = 1.0
+        if rc is not None:
+            aggression = float(rc.get("aggression", 1.0))
+        effective_offset = price_offset * aggression
         qty_frac = float(self._qty_grid[qty_idx % len(self._qty_grid)])
 
         if act_type == 3:  # CANCEL_BUY: release order and return unfilled qty to 4h limit
@@ -528,7 +561,7 @@ class GEEnv(gym.Env):
                 else:
                     blocked_reason = blocked_reason or "buy_blocked_no_cash"
             else:
-                limit_price = mid * (1.0 + price_offset * self.cfg.price_offset_pct_step)
+                limit_price = mid * (1.0 + effective_offset * self.cfg.price_offset_pct_step)
                 if limit_price <= 0:
                     blocked_reason = blocked_reason or "buy_blocked_invalid_limit_price"
                 else:
@@ -553,6 +586,20 @@ class GEEnv(gym.Env):
                             trade_budget = max(0.0, spend_cap) * qty_frac
                             units_wanted = int(trade_budget / limit_price)
                             units_order = min(units_wanted, remaining)
+                            # risk_config: cap by max_position_gp and max_units_per_trade (watchlist_bias scales cap)
+                            if rc is not None:
+                                max_pos_gp = rc.get("max_position_gp")
+                                if max_pos_gp is not None:
+                                    max_pos_units = int(float(max_pos_gp) / limit_price)
+                                    if self.position_item == item_id:
+                                        max_pos_units = max(0, max_pos_units - int(self.position_units))
+                                    units_order = min(units_order, max_pos_units)
+                                max_units_cap = rc.get("max_units_per_trade")
+                                if max_units_cap is not None:
+                                    bias = float((rc.get("watchlist_bias") or {}).get(item_id, 0.0))
+                                    cap = int(float(max_units_cap) * (1.0 + bias))
+                                    cap = max(1, cap)
+                                    units_order = min(units_order, cap)
                             if units_order <= 0:
                                 blocked_reason = blocked_reason or "buy_blocked_limit_reached"
                             else:
@@ -584,7 +631,7 @@ class GEEnv(gym.Env):
                     if base_mid <= 0:
                         blocked_reason = blocked_reason or "sell_blocked_invalid_price"
                     else:
-                        limit_price = base_mid * (1.0 + price_offset * self.cfg.price_offset_pct_step)
+                        limit_price = base_mid * (1.0 + effective_offset * self.cfg.price_offset_pct_step)
                         if limit_price <= 0:
                             blocked_reason = blocked_reason or "sell_blocked_invalid_limit_price"
                         else:
@@ -605,7 +652,7 @@ class GEEnv(gym.Env):
                                 exec_price = float(limit_price)
 
         # simulate probabilistic partial fills for resting orders (including ones just posted)
-        buy_filled, sell_filled = self._simulate_fills(snap)
+        buy_filled, sell_filled, buy_volume_gp, sell_volume_gp = self._simulate_fills(snap)
         if buy_filled > 0 and sell_filled == 0:
             executed = "BUY"
         elif sell_filled > 0 and buy_filled == 0:
@@ -703,6 +750,9 @@ class GEEnv(gym.Env):
         info["executed"] = executed
         info["buy_filled"] = int(buy_filled)
         info["sell_filled"] = int(sell_filled)
+        info["buy_volume_gp"] = float(buy_volume_gp)
+        info["sell_volume_gp"] = float(sell_volume_gp)
+        info["spread_pct"] = float(spread_pct)
         info["has_active_buy"] = self.active_buy is not None
         info["has_active_sell"] = self.active_sell is not None
         if exec_price is not None:
