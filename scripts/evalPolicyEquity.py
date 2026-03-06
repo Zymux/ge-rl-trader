@@ -20,12 +20,13 @@ VECNORM_PATH = "docs/assets/ppo_ge_trader/vecnormalize.pkl"
 DERIVED_ROOT = Path("data/news/derived")
 
 
-def make_env(risk_config=None):
+def make_env(risk_config=None, seed=None):
     cfg = GEEnvConfig(
         ts_path=TS_PATH,
         episode_len=EPISODE_LEN,
         starting_cash=STARTING_CASH,
         risk_config=risk_config,
+        seed=int(seed) if seed is not None else 123,
     )
     return GEEnv(cfg)
 
@@ -55,6 +56,8 @@ def check_timeseries(ts_path: str) -> None:
 def main():
     parser = argparse.ArgumentParser(description="Evaluate policy equity; optional risk_config via --date.")
     parser.add_argument("--date", type=str, default=None, help="Load risk_config_<date>.json from data/news/derived (applies for all episodes).")
+    parser.add_argument("--spread-guard-override", type=float, default=None, help="Override spread_guard_pct in risk_config (e.g. 0.03, 0.045, 0.05) for sweep.")
+    parser.add_argument("--seed", type=int, default=None, help="RNG seed for reproducibility (passed to env on first reset).")
     parser.add_argument("--episodes", type=int, default=50, help="Number of eval episodes.")
     args = parser.parse_args()
 
@@ -66,14 +69,20 @@ def main():
         if rc_path.exists():
             with rc_path.open("r", encoding="utf-8") as f:
                 risk_config = json.load(f)
-            print(f"[Config] Using risk_config from {rc_path}")
+            if args.spread_guard_override is not None:
+                risk_config["spread_guard_pct"] = args.spread_guard_override
+                print(f"[Config] Using risk_config from {rc_path} (spread_guard_pct override: {args.spread_guard_override})")
+            else:
+                print(f"[Config] Using risk_config from {rc_path}")
         else:
             print(f"[Config] --date {args.date} but {rc_path} not found; running without risk_config.")
 
     # Same model/vecnorm as verifyLearning by default; same GEEnv code version.
     print(f"[Config] Model: {MODEL_PATH}  VecNorm: {VECNORM_PATH}  TS: {TS_PATH}\n")
+    if args.seed is not None:
+        print(f"[Config] Seed: {args.seed} (env RNG deterministic for this run)\n")
     model = PPO.load(MODEL_PATH)
-    venv = DummyVecEnv([lambda: make_env(risk_config=risk_config)])
+    venv = DummyVecEnv([lambda rc=risk_config, s=args.seed: make_env(risk_config=rc, seed=s)])
     venv = VecNormalize.load(VECNORM_PATH, venv)
     venv.training = False
     venv.norm_reward = False

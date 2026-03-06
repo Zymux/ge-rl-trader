@@ -393,10 +393,19 @@ class GEEnv(gym.Env):
 
         return self._get_obs(), {}
 
-    def _simulate_fills(self, snap: pd.DataFrame) -> Tuple[int, int]:
-        """Probabilistic partial fills for at most one buy + one sell offer."""
+    def _simulate_fills(self, snap: pd.DataFrame) -> Tuple[int, int, float, float]:
+        """Probabilistic partial fills for at most one buy + one sell offer.
+
+        Returns:
+            buy_filled: units filled on buy side
+            sell_filled: units filled on sell side
+            buy_volume_gp: gross gp spent on buys this step
+            sell_volume_gp: net gp received from sells this step (after tax)
+        """
         buy_filled = 0
         sell_filled = 0
+        buy_volume_gp = 0.0
+        sell_volume_gp = 0.0
 
         if self.active_buy is not None:
             qty = int(self.active_buy.get("qty_remaining", 0))
@@ -419,6 +428,7 @@ class GEEnv(gym.Env):
                                 fill_qty = min(fill_qty, max_affordable)
                                 if fill_qty > 0:
                                     cost = float(fill_qty) * price
+                                    buy_volume_gp += cost
                                     self.cash -= cost
                                     # update position and cost basis
                                     if self.position_item is None:
@@ -455,6 +465,7 @@ class GEEnv(gym.Env):
                                 if fill_qty > 0:
                                     gross = float(fill_qty) * price
                                     proceeds_after_tax = self.rules.apply_sell_tax(gross)
+                                    sell_volume_gp += proceeds_after_tax
                                     self.cash += proceeds_after_tax
                                     # update position units and cost basis (simple average-cost model)
                                     if self.position_units > 0:
@@ -471,7 +482,7 @@ class GEEnv(gym.Env):
         if self.active_sell is not None and int(self.active_sell.get("qty_remaining", 0)) <= 0:
             self.active_sell = None
 
-        return buy_filled, sell_filled
+        return buy_filled, sell_filled, buy_volume_gp, sell_volume_gp
 
     def step(self, action: np.ndarray) -> Tuple[np.ndarray, float, bool, bool, Dict[str, Any]]:
         cand_idx = int(action[0])
@@ -479,7 +490,7 @@ class GEEnv(gym.Env):
         price_offset_idx = int(action[2])
         qty_idx = int(action[3])
 
-        # Context-invalid actions → auto-HOLD; set blocked_reason for sell diagnostic (no penalty: act_type→0)
+        # Context-invalid actions → auto-HOLD or mapped to CANCEL; set blocked_reason for true blocks only
         blocked_reason: Optional[str] = None
         if act_type == 2 and (self.position_item is None or self.position_units <= 0):
             blocked_reason = "sell_blocked_no_position"
@@ -488,9 +499,9 @@ class GEEnv(gym.Env):
             act_type = 0  # BUY when already in position
         if act_type == 1 and self.active_buy is not None:
             act_type = 0  # PLACE_BUY when buy order already resting
+        # Option A: SELL + active sell → CANCEL_SELL (so action is useful; reduces sell_blocked_active_order)
         if act_type == 2 and self.active_sell is not None:
-            blocked_reason = "sell_blocked_active_order"
-            act_type = 0  # PLACE_SELL when sell order already resting
+            act_type = 4  # map to CANCEL_SELL instead of HOLD
 
         # v2.1: CANCEL — no order to cancel → treat as HOLD (no blocked_reason)
         if act_type == 3 and self.active_buy is None:
@@ -518,10 +529,6 @@ class GEEnv(gym.Env):
                 act_type = 0
             if max_open <= 1 and act_type == 2 and self.active_buy is not None:
                 blocked_reason = blocked_reason or "risk_blocked_max_open_orders"
-                act_type = 0
-            focus = rc.get("focus_items") or []
-            if focus and act_type == 1 and item_id >= 0 and item_id not in focus:
-                blocked_reason = blocked_reason or "risk_blocked_focus_items"
                 act_type = 0
 
         executed = "NONE"
@@ -689,11 +696,13 @@ class GEEnv(gym.Env):
             reward -= INVALID_ACTION_PENALTY
         else:
             reward -= HOLD_PENALTY
-        # Reduce SELL spam: small penalty when SELL was requested but blocked (nudge feasibility)
+        # Reduce SELL spam: penalty when SELL blocked; small reward for CANCEL_SELL (learn cancel-then-sell)
         if blocked_reason == "sell_blocked_active_order":
-            reward -= 0.001   # sell already resting → prefer HOLD or CANCEL_SELL
+            reward -= 0.001   # (rare if Option A mapping is on)
         elif blocked_reason == "sell_blocked_no_position":
             reward -= 0.003   # no position → prefer HOLD or PLACE_BUY
+        if executed == "CANCEL_SELL":
+            reward += 0.0005  # Option B: reward successful cancel so policy learns SELL→CANCEL→SELL
 
         # Debug / eval: timestamp and acted-on item/price, position mark (for Episode 0 trace)
         step_ts = self.times[self.t - 1]

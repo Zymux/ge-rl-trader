@@ -247,3 +247,45 @@ The context card contains:
 - `events` (list of classified events with types like `NEW_BOSS`, `ITEM_NERF`, `BUG/HOTFIX`, etc.)
 - `watchlist` (candidate item_ids with a short reason and `expected_impact` like `demand_up` or `demand_down`)
 - `risk_flags` (e.g. `["hotfix_rolling", "bug_reports"]`)
+
+### Final tuned cautious config (production simulator)
+
+This is the current **production-worthy** simulator config for cautious (risk-managed) evaluation.
+
+**Baseline (no risk_config, 50 eps)**  
+| Metric | Value |
+|--------|--------|
+| Equity mean | 1.0304 |
+| Equity std | 0.0997 |
+| Max drawdown (mean) | 0.0754 |
+| Turnover | 4.29 |
+| Blocked sell rate | 0.0014 |
+
+**Tuned cautious (risk_config 2026-03-03, 50 eps)**  
+| Metric | Value |
+|--------|--------|
+| Equity mean | 1.0143 |
+| Equity std | 0.0356 |
+| Max drawdown (mean) | 0.0389 |
+| Turnover | 1.40 |
+| Blocked sell rate | 0.0000 |
+
+- **Option A** (env fix): When the policy requests **SELL** and a sell order is already resting, the env maps the action to **CANCEL_SELL** instead of HOLD. That removes the `sell_blocked_active_order` loop (SELL → blocked → HOLD → SELL …) and makes the action state-changing. After Option A, only `sell_blocked_no_position` (policy mistakes) remain, and they stay rare.
+- **spread_guard_pct = 0.045** was chosen from a small sweep (0.03, 0.045, 0.05). The rule is “block when spread_pct > spread_guard_pct”; 0.045 balances opportunity and safety and lands equity in the 1.01–1.02 band with drawdown ~0.03–0.04 and turnover ~1–2.
+- **Cautious knobs**: `max_open_orders = 2`, `max_position_gp` and aggression set via risk manager (e.g. 750k, 0.7 with `--cautious-max-pos-gp` / `--cautious-aggression-cap`). Regenerate dated risk config with:  
+  `python -m scripts.riskManager --date YYYY-MM-DD` (optionally `--cautious-max-pos-gp 750000 --cautious-aggression-cap 0.7`).
+
+**3-seed confirmation (tuned config, 50 eps each)**  
+| Seed | Equity mean | std | Max drawdown | Turnover | Blocked sell rate |
+|------|-------------|-----|--------------|----------|-------------------|
+| 42   | 1.0065      | 0.027 | 0.022        | 0.78     | 0.024             |
+| 123  | 1.0143      | 0.036 | 0.039        | 1.40     | 0.000             |
+| 456  | 1.0046      | 0.021 | 0.020        | 0.96     | 0.002             |
+
+Run with: `python -m scripts.evalPolicyEquity --date 2026-03-03 --episodes 50 --seed <42|123|456>`.
+
+**Artifacts to keep**  
+- Final training curve: `docs/assets/ppo_training_returns_*.png`  
+- Final eval output: run `python -m scripts.evalPolicyEquity --date 2026-03-03` and save the paper-grade metrics block  
+- Spread-guard sweep table (0.03 / 0.045 / 0.05) and 3-seed confirmation (seeds 42, 123, 456)  
+- Risk config: `data/news/derived/risk_config_2026-03-03.json`

@@ -110,6 +110,14 @@
 - Appended to JSONL for replayability, offline evaluation, and future embeddings/retrieval
 - 
 
+## 2026-03-05 -
+
+### Final tuned cautious config
+- **Spread-guard sweep**: Ran evals with spread_guard_pct = 0.03, 0.045, 0.05 (tuned config otherwise fixed). 0.045 and 0.05 gave equity ~1.01–1.02, drawdown ~0.03–0.04, turnover ~1–2; 0.03 was tightest (lowest equity/turnover). Chose **0.045** as cautious default in riskManager.
+- **Option A confirmed**: SELL + active sell → CANCEL_SELL removes the sell_blocked_active_order loop; post-fix evals show 0 active-order blocks, only rare sell_blocked_no_position.
+- **Risk manager default**: Cautious mode now uses spread_guard_pct = 0.045; regenerated `risk_config_2026-03-03.json` with tuned params (750k, aggression 0.7).
+- **Final confirmation**: One 50-ep eval with `--date 2026-03-03`: equity mean 1.0143, drawdown 0.0389, turnover 1.40, blocked sell rate 0. 3-seed runs (seeds 42, 123, 456) keep equity ~1.00–1.02, drawdown ~0.02–0.04, turnover ~0.78–1.40, blocked sells low. Production simulator config frozen; README updated with baseline vs tuned metrics and artifact list.
+
 ## PENDING: 
 - Collecting 3+ hours of snapshots to increase unique timestamps for longer episodes
 - Updated GE to have real OSRS 4-hour buy limits (per item)

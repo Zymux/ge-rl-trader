@@ -43,6 +43,9 @@ def clamp(x: float, lo: float, hi: float) -> float:
 def build_risk_config(
     context_card: Dict[str, Any],
     health: Optional[Dict[str, Any]] = None,
+    *,
+    cautious_max_position_gp: Optional[float] = None,
+    cautious_aggression_cap: Optional[float] = None,
 ) -> Dict[str, Any]:
     """
     Build bounded risk_config from context card and optional health snapshot.
@@ -64,16 +67,17 @@ def build_risk_config(
     # Rule: hotfix or bug_reports → cautious
     if "hotfix_rolling" in risk_flags or "bug_reports" in risk_flags:
         risk_mode = "cautious"
-        max_position_gp = 500_000.0
-        max_open_orders = 1
-        spread_guard_pct = 0.035
+        max_position_gp = cautious_max_position_gp or 500_000.0
+        max_open_orders = 2
+        spread_guard_pct = 0.045  # sweet spot: balance opportunity vs safety (block when spread_pct > this)
 
     # Rule: high blocked sell rate → reduce aggression (less aggressive pricing → fewer spam attempts)
     blocked_sell_rate = health.get("blocked_sell_rate")
     if blocked_sell_rate is not None and float(blocked_sell_rate) > 0.2:
         aggression = 0.5
     if risk_mode == "cautious":
-        aggression = min(aggression, 0.5)
+        cap = cautious_aggression_cap if cautious_aggression_cap is not None else 0.5
+        aggression = min(aggression, cap)
 
     # Rule: high buy block rate → slightly tighter spread guard (avoid illiquid)
     buy_block_rate = health.get("buy_block_rate")
@@ -128,6 +132,8 @@ def main() -> None:
     parser.add_argument("--date", type=str, default=None, help="Date YYYY-MM-DD (context_card_<date>.json). Default: today UTC.")
     parser.add_argument("--context-card", type=str, default=None, help="Path to context card JSON (overrides --date).")
     parser.add_argument("--health", type=str, default=None, help="Path to health snapshot JSON (optional).")
+    parser.add_argument("--cautious-max-pos-gp", type=float, default=None, help="Override cautious max_position_gp cap (default 500_000).")
+    parser.add_argument("--cautious-aggression-cap", type=float, default=None, help="Override aggression cap in cautious mode (default 0.5).")
     parser.add_argument("--out", type=str, default=None, help="Output path for risk_config (default: data/news/derived/risk_config_<date>.json).")
     args = parser.parse_args()
 
@@ -152,7 +158,12 @@ def main() -> None:
         with Path(args.health).open("r", encoding="utf-8") as f:
             health = json.load(f)
 
-    risk_config = build_risk_config(context_card, health)
+    risk_config = build_risk_config(
+        context_card,
+        health,
+        cautious_max_position_gp=args.cautious_max_pos_gp,
+        cautious_aggression_cap=args.cautious_aggression_cap,
+    )
 
     out_path = Path(args.out) if args.out else DERIVED_ROOT / f"risk_config_{date_str}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
