@@ -275,7 +275,7 @@ This is the current **production-worthy** simulator config for cautious (risk-ma
 - **Cautious knobs**: `max_open_orders = 2`, `max_position_gp` and aggression set via risk manager (e.g. 750k, 0.7 with `--cautious-max-pos-gp` / `--cautious-aggression-cap`). Regenerate dated risk config with:  
   `python -m scripts.riskManager --date YYYY-MM-DD` (optionally `--cautious-max-pos-gp 750000 --cautious-aggression-cap 0.7`).
 
-**3-seed confirmation (tuned config, 50 eps each)**  
+**3-seed confirmation (tuned config, git add .50 eps each)**  
 | Seed | Equity mean | std | Max drawdown | Turnover | Blocked sell rate |
 |------|-------------|-----|--------------|----------|-------------------|
 | 42   | 1.0065      | 0.027 | 0.022        | 0.78     | 0.024             |
@@ -310,7 +310,7 @@ python -m scripts.riskManagerLLM --date 2026-03-03 --health path/to/health.json
 ```
 
 **Three-way comparison**
-Run the same eval (e.g. 50 episodes) under each condition and record paper-grade metrics (equity mean/std, max drawdown, turnover, blocked sell rate):
+Ran the same eval (e.g. 50 episodes) under each condition and record paper-grade metrics (equity mean/std, max drawdown, turnover, blocked sell rate):
 
 | Condition        | Command |
 |------------------|--------|
