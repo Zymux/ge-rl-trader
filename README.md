@@ -289,3 +289,33 @@ Run with: `python -m scripts.evalPolicyEquity --date 2026-03-03 --episodes 50 --
 - Final eval output: run `python -m scripts.evalPolicyEquity --date 2026-03-03` and save the paper-grade metrics block  
 - Spread-guard sweep table (0.03 / 0.045 / 0.05) and 3-seed confirmation (seeds 42, 123, 456)  
 - Risk config: `data/news/derived/risk_config_2026-03-03.json`
+
+---
+
+### Step 4: LLM-assisted risk manager
+
+The **rule-based** risk manager (`scripts/riskManager.py`) is the benchmark. An **LLM-assisted** path produces the same bounded knobs from the same inputs (context card + optional health) so you can compare three conditions.
+
+**Setup**
+- LLM script: `scripts/riskManagerLLM.py`. Reads `context_card_YYYY-MM-DD.json`, sends a prompt (events, watchlist, risk_flags, optional health), and asks the LLM to output a single JSON object with the same keys as the rule-based config. All values are then **clamped** to the same bounds as `riskManager.py` before writing.
+- Output: `data/news/derived/risk_config_llm_<date>.json` (so it does not overwrite the rule-based config).
+- Requires `OPENAI_API_KEY` in the environment. Uses OpenAI Chat Completions (e.g. `gpt-4o-mini`); optional `OPENAI_MODEL`, `OPENAI_BASE_URL` for other endpoints.
+
+**Generate LLM risk config**
+```bash
+# Context card must exist (run newsCollect + newsExtract first)
+python -m scripts.riskManagerLLM --date 2026-03-03
+# Optional: pass health snapshot from a previous eval
+python -m scripts.riskManagerLLM --date 2026-03-03 --health path/to/health.json
+```
+
+**Three-way comparison**
+Run the same eval (e.g. 50 episodes) under each condition and record paper-grade metrics (equity mean/std, max drawdown, turnover, blocked sell rate):
+
+| Condition        | Command |
+|------------------|--------|
+| **No manager**   | `python -m scripts.evalPolicyEquity --episodes 50` |
+| **Rule-based**   | `python -m scripts.evalPolicyEquity --date 2026-03-03 --episodes 50` |
+| **LLM-assisted**  | `python -m scripts.riskManagerLLM --date 2026-03-03` then `python -m scripts.evalPolicyEquity --risk-config data/news/derived/risk_config_llm_2026-03-03.json --episodes 50` |
+
+Compare equity mean, drawdown, turnover, and blocked sell rate across the three runs to see whether the LLM config matches or improves on the rule-based benchmark.

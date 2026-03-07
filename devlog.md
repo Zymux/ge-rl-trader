@@ -118,6 +118,12 @@
 - **Risk manager default**: Cautious mode now uses spread_guard_pct = 0.045; regenerated `risk_config_2026-03-03.json` with tuned params (750k, aggression 0.7).
 - **Final confirmation**: One 50-ep eval with `--date 2026-03-03`: equity mean 1.0143, drawdown 0.0389, turnover 1.40, blocked sell rate 0. 3-seed runs (seeds 42, 123, 456) keep equity ~1.00–1.02, drawdown ~0.02–0.04, turnover ~0.78–1.40, blocked sells low. Production simulator config frozen; README updated with baseline vs tuned metrics and artifact list.
 
+## 2026-03-05 (continued) - Step 4: LLM-assisted risk manager
+
+- **riskManagerLLM.py**: Reads `context_card_<date>.json` (and optional health), builds a prompt describing events/watchlist/risk_flags and the required risk_config schema (same keys as rule-based). Calls OpenAI Chat Completions (OPENAI_API_KEY), parses JSON from response, clamps all values to same bounds as riskManager.py, writes `risk_config_llm_<date>.json`.
+- **evalPolicyEquity**: Added `--risk-config <path>` to load an explicit risk config (e.g. LLM output) instead of `risk_config_<date>.json`.
+- **Three-way comparison**: No manager (no --date), rule-based (--date), LLM-assisted (--risk-config .../risk_config_llm_<date>.json). README documents the three commands and comparison table.
+
 ## PENDING: 
 - Collecting 3+ hours of snapshots to increase unique timestamps for longer episodes
 - Updated GE to have real OSRS 4-hour buy limits (per item)
