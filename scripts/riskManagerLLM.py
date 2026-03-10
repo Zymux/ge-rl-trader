@@ -19,6 +19,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 import requests
+from scripts.riskManager import build_risk_config as build_risk_config_rule_based
 
 ROOT_DIR = Path(__file__).resolve().parents[1]
 DERIVED_ROOT = ROOT_DIR / "data" / "news" / "derived"
@@ -57,6 +58,8 @@ def _call_llm(system: str, user: str, *, api_key: str, model: str, base_url: Opt
         ],
         "temperature": 0.2,
         "max_tokens": 2000,
+        # For OpenAI 4.1+ style models: ask for strict JSON to avoid parse errors.
+        "response_format": {"type": "json_object"},
     }
     headers = {"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"}
     resp = requests.post(url, headers=headers, json=payload, timeout=60)
@@ -66,30 +69,33 @@ def _call_llm(system: str, user: str, *, api_key: str, model: str, base_url: Opt
     if not choice:
         raise ValueError("No choices in LLM response")
     msg = choice[0].get("message") or {}
-    return (msg.get("content") or "").strip()
+    content = (msg.get("content") or "").strip()
+    return content
 
 
 def _build_prompt(context_card: Dict[str, Any], health: Optional[Dict[str, Any]]) -> tuple[str, str]:
-    system = """You are a risk manager for a trading simulator. Given a context card (news events, watchlist, risk flags) and optional health metrics, you must output a single JSON object with exactly these keys. All numeric values will be clamped to safe bounds by the system; you only need to choose sensible values.
+    system = """You are a risk manager for a trading simulator. Given a context card (news events, watchlist, risk flags) and optional health metrics, you must output a SINGLE FLAT JSON object with EXACTLY these six keys (no others):
 
-Output keys (no extra keys):
-- risk_mode: "normal" or "cautious"
-- max_position_gp: number (max position size in gp)
-- max_units_per_trade: number
-- max_open_orders: integer 1-3
-- spread_guard_pct: number 0-0.05 (block trades when spread is wider than this)
-- aggression: number 0-1 (pricing aggression)
-- watchlist_bias: object mapping item_id (as string) to a number in [-0.25, 0.25] (e.g. {"560": 0.1, "565": -0.1}). Only include items from the watchlist.
-- focus_items: array of item_id integers (e.g. [560, 565]). Typically items with demand_up.
+{
+  "risk_mode": "normal" | "cautious",
+  "max_position_gp": <number>,
+  "max_units_per_trade": <number>,
+  "max_open_orders": <integer 1-3>,
+  "spread_guard_pct": <number between 0 and 0.05>,
+  "aggression": <number between 0 and 1>
+}
 
-Rules to follow:
-- If risk_flags include "hotfix_rolling" or "bug_reports", set risk_mode to "cautious", lower max_position_gp (e.g. 500000), and use a stricter spread_guard_pct (e.g. 0.04).
-- For demand_up watchlist items, use positive watchlist_bias (e.g. 0.1) and add them to focus_items.
-- For demand_down or supply_up, use negative watchlist_bias (e.g. -0.1).
+Constraints:
+- Do not include watchlist_bias or focus_items. Only the six keys above.
+- All values must be valid JSON (no comments, no trailing commas).
+
+Heuristics:
+- If risk_flags include "hotfix_rolling" or "bug_reports", use "cautious" mode and lower max_position_gp (e.g. 500000) and a safer spread_guard_pct (e.g. 0.04–0.045).
 - If health shows high blocked_sell_rate or high drawdown, reduce aggression or max_position_gp.
-Output only valid JSON, no markdown or explanation."""
+- Otherwise stay closer to normal mode and higher max_position_gp.
+Return ONLY the JSON object, nothing else."""
 
-    user_parts = ["Context card (use events, watchlist, risk_flags to decide):\n"]
+    user_parts = ["Context card (use events, watchlist, risk_flags, health to decide sensible values):\n"]
     user_parts.append(json.dumps(context_card, indent=2))
     if health:
         user_parts.append("\n\nOptional health snapshot (use to tighten if bad):\n")
@@ -108,10 +114,28 @@ def build_risk_config_llm(
 ) -> Dict[str, Any]:
     """
     Call LLM to produce a risk_config, then clamp all values to safe bounds.
+    On any API / parsing error, fall back to the rule-based risk manager.
+
+    Returns a dict that always includes an internal '_source' key:
+    - '_source' == 'llm' when the LLM response was used
+    - '_source' == 'rule_based_fallback' when we fell back
     """
     system, user = _build_prompt(context_card, health)
-    raw = _call_llm(system, user, api_key=api_key, model=model, base_url=base_url)
-    out = _parse_json_from_response(raw)
+    try:
+        raw = _call_llm(system, user, api_key=api_key, model=model, base_url=base_url)
+        # Log raw response for debugging
+        try:
+            dbg_path = DERIVED_ROOT / f"risk_config_llm_{context_card.get('date', 'unknown')}_raw.txt"
+            dbg_path.write_text(raw, encoding="utf-8")
+        except Exception:
+            pass
+        out = _parse_json_from_response(raw)
+    except Exception as e:
+        # Fail-safe: delegate to rule-based manager
+        print(f"[riskManagerLLM] LLM call failed ({e!r}); falling back to rule-based riskManager.")
+        rb = build_risk_config_rule_based(context_card, health)
+        rb["_source"] = "rule_based_fallback"
+        return rb
 
     # Apply same bounds as rule-based manager
     risk_mode = (out.get("risk_mode") or "normal").strip().lower()
@@ -124,25 +148,9 @@ def build_risk_config_llm(
     spread_guard_pct = clamp(out.get("spread_guard_pct", 0.02), *SPREAD_GUARD_PCT_RANGE)
     aggression = clamp(out.get("aggression", 0.7), *AGGRESSION_RANGE)
 
-    watchlist_bias_raw = out.get("watchlist_bias")
-    if not isinstance(watchlist_bias_raw, dict):
-        watchlist_bias_raw = {}
+    # In the first true-LLM experiment, we ignore watchlist-specific knobs and keep them empty.
     watchlist_bias: Dict[str, float] = {}
-    for k, v in watchlist_bias_raw.items():
-        try:
-            watchlist_bias[str(k)] = clamp(float(v), *WATCHLIST_BIAS_RANGE)
-        except (TypeError, ValueError):
-            pass
-
-    focus_items_raw = out.get("focus_items")
-    if not isinstance(focus_items_raw, list):
-        focus_items_raw = []
     focus_items: List[int] = []
-    for x in focus_items_raw:
-        try:
-            focus_items.append(int(x))
-        except (TypeError, ValueError):
-            pass
 
     return {
         "risk_mode": risk_mode,
@@ -153,6 +161,7 @@ def build_risk_config_llm(
         "aggression": aggression,
         "watchlist_bias": watchlist_bias,
         "focus_items": focus_items,
+        "_source": "llm",
     }
 
 
@@ -192,26 +201,35 @@ def main() -> None:
             with hp.open("r", encoding="utf-8") as f:
                 health = json.load(f)
 
+    # Read the API key from the standard env var; do not hardcode secrets here.
     api_key = os.environ.get("OPENAI_API_KEY")
-    if not api_key:
-        raise RuntimeError("Set OPENAI_API_KEY in the environment to use the LLM risk manager.")
-
     model = args.model or os.environ.get("OPENAI_MODEL", "gpt-4o-mini")
     base_url = args.base_url or os.environ.get("OPENAI_BASE_URL")
 
-    risk_config = build_risk_config_llm(
-        context_card,
-        health,
-        api_key=api_key,
-        model=model,
-        base_url=base_url,
-    )
+    if not api_key:
+        print("[riskManagerLLM] OPENAI_API_KEY not set; using rule-based riskManager fallback.")
+        risk_config = build_risk_config_rule_based(context_card, health)
+        source = "rule_based_fallback"
+    else:
+        risk_config = build_risk_config_llm(
+            context_card,
+            health,
+            api_key=api_key,
+            model=model,
+            base_url=base_url,
+        )
+        # build_risk_config_llm annotates its own source
+        source = risk_config.pop("_source", "llm")
 
     out_path = Path(args.out) if args.out else DERIVED_ROOT / f"risk_config_llm_{date_str}.json"
     out_path.parent.mkdir(parents=True, exist_ok=True)
+    # Annotate source for easier debugging / ablations.
+    payload = dict(risk_config)
+    payload["_source"] = source
+
     with out_path.open("w", encoding="utf-8") as f:
-        json.dump(risk_config, f, indent=2)
-    print(f"Wrote {out_path}")
+        json.dump(payload, f, indent=2)
+    print(f"Wrote {out_path}  (source={source})")
     print(
         f"  risk_mode={risk_config['risk_mode']}  max_position_gp={risk_config['max_position_gp']}  "
         f"aggression={risk_config['aggression']}  spread_guard_pct={risk_config['spread_guard_pct']}"
