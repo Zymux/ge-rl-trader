@@ -73,8 +73,13 @@ def _call_llm(system: str, user: str, *, api_key: str, model: str, base_url: Opt
     return content
 
 
-def _build_prompt(context_card: Dict[str, Any], health: Optional[Dict[str, Any]]) -> tuple[str, str]:
-    system = """You are a risk manager for a trading simulator. Given a context card (news events, watchlist, risk flags) and optional health metrics, you must output a SINGLE FLAT JSON object with EXACTLY these six keys (no others):
+def _build_prompt(context_card: Dict[str, Any], health: Optional[Dict[str, Any]], rule_config: Dict[str, Any]) -> tuple[str, str]:
+    system = """You are a risk manager for a trading simulator. Given:
+- a context card (news events, watchlist, risk flags)
+- optional health metrics
+- and a reference rule-based risk_config
+
+you must output a SINGLE FLAT JSON object with EXACTLY these six keys (no others):
 
 {
   "risk_mode": "normal" | "cautious",
@@ -86,20 +91,24 @@ def _build_prompt(context_card: Dict[str, Any], health: Optional[Dict[str, Any]]
 }
 
 Constraints:
-- Do not include watchlist_bias or focus_items. Only the six keys above.
+- Do not include watchlist_bias or focus_items. Only the six keys above (the system will re-use the rule-based watchlist_bias / focus_items).
 - All values must be valid JSON (no comments, no trailing commas).
 
 Heuristics:
+- Start from the provided rule-based config as a good reference; adjust it instead of inventing something unrelated.
 - If risk_flags include "hotfix_rolling" or "bug_reports", use "cautious" mode and lower max_position_gp (e.g. 500000) and a safer spread_guard_pct (e.g. 0.04–0.045).
-- If health shows high blocked_sell_rate or high drawdown, reduce aggression or max_position_gp.
-- Otherwise stay closer to normal mode and higher max_position_gp.
+- If health shows high blocked_sell_rate or high drawdown, reduce aggression or max_position_gp modestly (do not collapse them to near-zero unless the situation is extreme).
+- When risk_flags are mild and health is reasonable, avoid being overly conservative: keep max_position_gp and aggression in the general neighborhood of the rule-based values.
+- Soft target: keep drawdown under the rule-based level, but avoid reducing turnover so much that the agent almost never trades (i.e., do not shrink both max_position_gp and aggression at the same time by more than ~50% unless risk_flags are very severe).
 Return ONLY the JSON object, nothing else."""
 
-    user_parts = ["Context card (use events, watchlist, risk_flags, health to decide sensible values):\n"]
+    user_parts = ["Context card (events, watchlist, risk_flags, health):\n"]
     user_parts.append(json.dumps(context_card, indent=2))
     if health:
         user_parts.append("\n\nOptional health snapshot (use to tighten if bad):\n")
         user_parts.append(json.dumps(health, indent=2))
+    user_parts.append("\n\nReference rule-based risk_config (good baseline to adjust from):\n")
+    user_parts.append(json.dumps(rule_config, indent=2))
     user_parts.append("\n\nOutput the risk_config JSON only:")
     return system, "".join(user_parts)
 
@@ -120,7 +129,11 @@ def build_risk_config_llm(
     - '_source' == 'llm' when the LLM response was used
     - '_source' == 'rule_based_fallback' when we fell back
     """
-    system, user = _build_prompt(context_card, health)
+    # Build the rule-based config first so the LLM can see a sensible reference,
+    # and so we can re-use its watchlist_bias / focus_items.
+    rule_based_cfg = build_risk_config_rule_based(context_card, health)
+
+    system, user = _build_prompt(context_card, health, rule_based_cfg)
     try:
         raw = _call_llm(system, user, api_key=api_key, model=model, base_url=base_url)
         # Log raw response for debugging
@@ -148,9 +161,10 @@ def build_risk_config_llm(
     spread_guard_pct = clamp(out.get("spread_guard_pct", 0.02), *SPREAD_GUARD_PCT_RANGE)
     aggression = clamp(out.get("aggression", 0.7), *AGGRESSION_RANGE)
 
-    # In the first true-LLM experiment, we ignore watchlist-specific knobs and keep them empty.
-    watchlist_bias: Dict[str, float] = {}
-    focus_items: List[int] = []
+    # For now, keep watchlist_bias / focus_items from the rule-based manager so that
+    # demand_up items still get non-empty bias/focus even when the LLM only controls scalars.
+    watchlist_bias: Dict[str, float] = dict(rule_based_cfg.get("watchlist_bias") or {})
+    focus_items: List[int] = list(rule_based_cfg.get("focus_items") or [])
 
     return {
         "risk_mode": risk_mode,

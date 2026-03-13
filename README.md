@@ -318,13 +318,14 @@ Ran the same eval (50 episodes) under each condition and recorded paper-grade me
 | **Rule-based**   | `python -m scripts.evalPolicyEquity --date 2026-03-03 --episodes 50 --seed <42|123|456>` |
 | **LLM-assisted**  | `python -m scripts.riskManagerLLM --date 2026-03-03` then `python -m scripts.evalPolicyEquity --risk-config data/news/derived/risk_config_llm_2026-03-03.json --episodes 50 --seed <42|123|456>` |
 
-**Final 3-way ablation (2026-03-03, seeds 42/123/456, averaged)**
+**Final 3-way ablation (2026-03-03, seeds 42/123/456, averaged)**  
+Slim summary (focus on core risk/return metrics):
 
-| Mode          | Equity mean | Equity std | Max drawdown | Turnover | Blocked sell rate | Blocked buy rate |
-|--------------|-------------|-----------|--------------|----------|-------------------|------------------|
-| Baseline     | ~1.017      | ~0.074    | ~0.054       | ~3.38    | ~0.001            | ~0.005           |
-| Rule-based   | ~1.009      | ~0.028    | ~0.027       | ~1.05    | ~0.009            | ~0.005           |
-| LLM-assisted | ~1.003      | ~0.018    | ~0.019       | ~0.82    | ~0.006            | ~0.005           |
+| Mode          | Equity mean | Max drawdown | Turnover | Blocked sell rate |
+|--------------|-------------|--------------|----------|-------------------|
+| Baseline     | ~1.017      | ~0.054       | ~3.38    | ~0.001            |
+| Rule-based   | ~1.009      | ~0.027       | ~1.05    | ~0.009            |
+| LLM-assisted | ~1.003–1.005| ~0.02        | ~0.8     | ~0.006–0.01       |
 
-- In this run, `riskManagerLLM` fell back to the **rule-based cautious** logic (no `OPENAI_API_KEY` configured), producing a slightly more conservative config (e.g. lower max_position_gp / aggression) than the tuned rule-based default. It therefore trades less, with lower equity and lower drawdown / turnover than the rule-based row.
-- Overall: **Baseline** has the highest equity but also the highest drawdown and turnover; the **rule-based** manager gives a cleaner risk/return profile (small equity give-up, large drop in drawdown and turnover); the current **LLM/fallback** path pushes further toward capital preservation (equity ~1.00, very low drawdown and turnover).
+- The **LLM-assisted** manager produces valid bounded configs (for 2026-03-03 it picked `risk_mode="cautious"`, `max_position_gp=500k`, `max_units_per_trade=250`, `max_open_orders=2`, `spread_guard_pct=0.045`, `aggression≈0.5`) and reuses the rule-based `watchlist_bias` / `focus_items`. It behaves as a conservative risk controller: it reduces exposure and drawdown further at the cost of slightly lower expected return and modestly higher blocked-sell rates.
+- Overall: **Baseline** has the highest upside but also the most churn and drawdown; the **rule-based** manager materially improves risk-adjusted behavior; the **LLM-assisted** manager pushes one notch further toward capital preservation, keeping equity close to 1.0 while tightening risk and trading activity.
